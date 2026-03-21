@@ -1,0 +1,21 @@
+{
+  "name": "flashflow",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run -ws build",
+    "dev:order-api": "npm run dev -w @flashflow/order-api",
+    "dev:outbox": "npm run dev -w @flashflow/outbox-publisher",
+    "start:order-api": "npm run start -w @flashflow/order-api",
+    "start:outbox": "npm run start -w @flashflow/outbox-publisher"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
