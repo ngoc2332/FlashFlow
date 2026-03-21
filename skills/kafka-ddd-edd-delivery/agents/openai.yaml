@@ -1,0 +1,4 @@
+interface:
+  display_name: "Kafka DDD EDD Delivery"
+  short_description: "Deliver features using project docs, DDD, and EDD guardrails"
+  default_prompt: "Before coding, map feature to docs requirements, model DDD boundaries, define events, then implement and validate with Kafka reliability patterns."
