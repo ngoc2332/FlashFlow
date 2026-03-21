@@ -82,7 +82,7 @@ services:
       retries: 10
 
   order-api:
-    profiles: ["phase1"]
+    profiles: ["phase1", "phase2"]
     build:
       context: .
       dockerfile: apps/order-api/Dockerfile
@@ -99,7 +99,7 @@ services:
       - "3000:3000"
 
   outbox-publisher:
-    profiles: ["phase1"]
+    profiles: ["phase1", "phase2"]
     build:
       context: .
       dockerfile: apps/outbox-publisher/Dockerfile
@@ -115,6 +115,26 @@ services:
       OUTBOX_CLIENT_ID: flashflow-outbox-publisher
       OUTBOX_POLL_INTERVAL_MS: 1000
       OUTBOX_BATCH_SIZE: 50
+
+  payment-worker:
+    profiles: ["phase2"]
+    build:
+      context: .
+      dockerfile: apps/payment-worker/Dockerfile
+    container_name: flashflow-payment-worker
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      PAYMENT_CLIENT_ID: flashflow-payment-worker
+      PAYMENT_CONSUMER_GROUP: payment-workers
+      PAYMENT_EVENTS_TOPIC: payment.events
+      PAYMENT_APPROVAL_LIMIT: 1000
+      PAYMENT_FAIL_USER_PREFIX: fail-payment
+      RETRY_TOPIC_5S: order.retry.5s
+      RETRY_TOPIC_1M: order.retry.1m
+      ORDER_DLQ_TOPIC: order.dlq
 
 volumes:
   kafka_data:

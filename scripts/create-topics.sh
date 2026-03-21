@@ -23,6 +23,7 @@ create_topic() {
 }
 
 create_topic "order.created" 6
+create_topic "payment.events" 6
 create_topic "order.retry.5s" 3
 create_topic "order.retry.1m" 3
 create_topic "order.dlq" 3
