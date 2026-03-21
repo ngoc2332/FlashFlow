@@ -7,6 +7,12 @@ description: Enforce docs-first feature delivery for the kafka-practice reposito
 
 ## Workflow
 
+### 0) Enforce security guardrails first
+
+- Read `references/security-guardrails.md` before making code or infra changes.
+- Refuse to hardcode secrets or expose tokens/passwords in code, docs, logs, or terminal output.
+- Treat destructive actions and production access as approval-gated operations.
+
 ### 1) Select docs language and source of truth
 
 - Use English docs under `docs/en` or Vietnamese docs under `docs/vi`.
@@ -41,6 +47,7 @@ description: Enforce docs-first feature delivery for the kafka-practice reposito
 - Keep domain rules in domain layer and infrastructure in adapters.
 - Add unit tests for aggregate invariants.
 - Add integration and failure tests for produce/consume, retry, DLQ, and restart recovery.
+- Run security checks from `references/security-guardrails.md` before finalizing changes.
 
 ### 7) Close with traceability
 
@@ -55,9 +62,11 @@ Use this template before coding:
 - Bounded context and aggregate:
 - Event contract changes:
 - Reliability impact (outbox/dedup/retry/DLQ):
+- Security impact (secrets/PII/command safety/network scope):
 - Test plan:
 
 ## References
 
 - Read `references/doc-map.md` for exact file mapping.
 - Read `references/feature-checklist.md` for definition of done.
+- Read `references/security-guardrails.md` for mandatory security rules.

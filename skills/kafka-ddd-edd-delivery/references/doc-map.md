@@ -29,3 +29,8 @@
 - Hạ tầng local: `docs/vi/Infra/01-ha-tang-local.md`
 - Quan sát vận hành/runbook: `docs/vi/Infra/02-observability-va-runbook.md`
 - Gói nội dung phỏng vấn: `docs/vi/Interview/01-goi-noi-dung-phong-van.md`
+
+## Tài liệu guardrails của skill
+
+- Security guardrails: `skills/kafka-ddd-edd-delivery/references/security-guardrails.md`
+- Delivery checklist: `skills/kafka-ddd-edd-delivery/references/feature-checklist.md`

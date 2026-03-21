@@ -31,6 +31,15 @@ Use this checklist before opening PR.
 - [ ] DB constraints and indexes match `Tech/05-*` guidance
 - [ ] Migration plan includes rollback note
 
+## Security and privacy
+
+- [ ] No secrets hardcoded in code, docs, scripts, or configs
+- [ ] No secrets or sensitive values printed in logs/output
+- [ ] Network calls stay within approved scope for the task
+- [ ] Destructive commands are approval-gated
+- [ ] Event payloads/logs avoid PII leakage and include redaction where needed
+- [ ] Dependency changes are pinned and reviewed for risk
+
 ## Testing
 
 - [ ] Unit test for domain invariant(s)
