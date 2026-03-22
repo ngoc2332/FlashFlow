@@ -3,21 +3,22 @@ import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
 import { Pool } from "pg";
 import {
   EventEnvelope,
+  HeaderValue,
   INVENTORY_EVENTS_TOPIC,
   INVENTORY_REJECTED_EVENT,
   INVENTORY_RESERVED_EVENT,
+  NonRetryableProcessingError,
   ORDER_CREATED_EVENT,
   PAYMENT_EVENTS_TOPIC,
   PAYMENT_FAILED_EVENT,
   PAYMENT_SUCCEEDED_EVENT,
+  RetryPolicy,
+  headerToString,
+  nextOffset,
+  normalizeHeaders,
+  parseRetryCount,
+  resolveRetryTarget,
 } from "@flashflow/common";
-
-class NonRetryableProcessingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NonRetryableProcessingError";
-  }
-}
 
 const postgresUrl =
   process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
@@ -33,6 +34,12 @@ const paymentEventsTopic = process.env.PAYMENT_EVENTS_TOPIC ?? PAYMENT_EVENTS_TO
 const inventoryEventsTopic = process.env.INVENTORY_EVENTS_TOPIC ?? INVENTORY_EVENTS_TOPIC;
 const orderStatusTopic = process.env.ORDER_STATUS_TOPIC ?? "order.status";
 
+const retryPolicy: RetryPolicy = {
+  retryTopic5s: process.env.RETRY_TOPIC_5S ?? "order.retry.5s",
+  retryTopic1m: process.env.RETRY_TOPIC_1M ?? "order.retry.1m",
+  dlqTopic: process.env.ORDER_DLQ_TOPIC ?? "order.dlq",
+};
+
 const statusByEventType: Record<string, string> = {
   [ORDER_CREATED_EVENT]: "PENDING_PAYMENT",
   [PAYMENT_SUCCEEDED_EVENT]: "PAYMENT_SUCCEEDED",
@@ -46,8 +53,25 @@ const kafka = new Kafka({ clientId, brokers });
 const consumer: Consumer = kafka.consumer({ groupId: consumerGroup });
 const producer: Producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
 
-function nextOffset(offset: string): string {
-  return (BigInt(offset) + 1n).toString();
+let isShuttingDown = false;
+let inFlightMessages = 0;
+let runPromise: Promise<void> | undefined;
+let shutdownPromise: Promise<void> | undefined;
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
+  if (Buffer.isBuffer(message.key)) {
+    return message.key.toString("utf8");
+  }
+
+  if (typeof message.key === "string") {
+    return message.key;
+  }
+
+  return "unknown-order";
 }
 
 async function commitOffset(payload: EachMessagePayload): Promise<void> {
@@ -80,8 +104,12 @@ function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
 
   const event = parsed as Partial<EventEnvelope<unknown>>;
 
-  if (typeof event.orderId !== "string" || event.orderId.trim().length === 0) {
-    throw new NonRetryableProcessingError("orderId is required");
+  if (typeof event.eventId !== "string" || !isUuid(event.eventId)) {
+    throw new NonRetryableProcessingError("eventId must be a valid UUID");
+  }
+
+  if (typeof event.orderId !== "string" || !isUuid(event.orderId)) {
+    throw new NonRetryableProcessingError("orderId must be a valid UUID");
   }
 
   if (typeof event.eventType !== "string" || event.eventType.trim().length === 0) {
@@ -89,10 +117,7 @@ function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
   }
 
   return {
-    eventId:
-      typeof event.eventId === "string" && event.eventId.trim().length > 0
-        ? event.eventId
-        : randomUUID(),
+    eventId: event.eventId,
     eventKind: event.eventKind === "domain" ? "domain" : "integration",
     eventType: event.eventType,
     orderId: event.orderId,
@@ -120,6 +145,28 @@ interface UpsertResult {
   lastUpdatedAt: string;
 }
 
+async function hasProcessedEvent(eventId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1
+     FROM processed_events
+     WHERE event_id = $1::uuid
+       AND consumer_group = $2
+     LIMIT 1`,
+    [eventId, consumerGroup],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function markProcessedEvent(eventId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO processed_events (event_id, consumer_group, processed_at)
+     VALUES ($1::uuid, $2, NOW())
+     ON CONFLICT (event_id, consumer_group) DO NOTHING`,
+    [eventId, consumerGroup],
+  );
+}
+
 async function upsertOrderStatus(
   event: EventEnvelope<unknown>,
   status: string,
@@ -135,7 +182,7 @@ async function upsertOrderStatus(
     last_updated_at: Date;
   }>(
     `INSERT INTO order_status_view (order_id, current_status, last_event_id, last_updated_at)
-     VALUES ($1, $2, $3::uuid, $4::timestamptz)
+     VALUES ($1::uuid, $2, $3::uuid, $4::timestamptz)
      ON CONFLICT (order_id) DO UPDATE
      SET current_status = CASE
            WHEN EXCLUDED.last_updated_at >= order_status_view.last_updated_at THEN EXCLUDED.current_status
@@ -190,27 +237,102 @@ async function publishStatusSnapshot(
   });
 }
 
-async function handleMessage(payload: EachMessagePayload): Promise<void> {
-  const event = parseEnvelope(payload.message.value);
-  const status = resolveStatus(event.eventType);
+async function routeToRetryOrDlq(
+  payload: EachMessagePayload,
+  orderId: string,
+  error: Error,
+): Promise<{ terminal: boolean; targetTopic: string }> {
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const retryCount = parseRetryCount(headers);
+  const route = resolveRetryTarget(error, retryCount, retryPolicy);
+  const normalizedHeaders = normalizeHeaders(headers);
+  const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
 
-  if (!status) {
+  await producer.send({
+    topic: route.topic,
+    messages: [
+      {
+        key: orderId,
+        value: messageValue,
+        headers: {
+          ...normalizedHeaders,
+          retryCount: String(route.nextRetryCount),
+          sourceTopic: payload.topic,
+          sourceService: serviceName,
+          targetWorker: serviceName,
+          errorType: error.name,
+          errorMessage: error.message,
+          failedAt: new Date().toISOString(),
+        },
+      },
+    ],
+  });
+
+  console.error(
+    `routed order ${orderId} to ${route.topic} after error ${error.name}: ${error.message}`,
+  );
+
+  return {
+    terminal: route.terminal,
+    targetTopic: route.topic,
+  };
+}
+
+async function handleMessage(payload: EachMessagePayload): Promise<void> {
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const targetWorker = headerToString(headers?.targetWorker);
+
+  const primaryTopics = new Set([ORDER_CREATED_EVENT, paymentEventsTopic, inventoryEventsTopic]);
+
+  if (!primaryTopics.has(payload.topic) && targetWorker !== serviceName) {
     await commitOffset(payload);
     return;
   }
 
-  const upsertResult = await upsertOrderStatus(event, status);
+  let event: EventEnvelope<unknown> | undefined;
 
-  if (upsertResult.applied) {
-    await publishStatusSnapshot(
-      event,
-      upsertResult.currentStatus,
-      upsertResult.lastEventId,
-      upsertResult.lastUpdatedAt,
-    );
+  try {
+    event = parseEnvelope(payload.message.value);
+
+    if (await hasProcessedEvent(event.eventId)) {
+      console.log(`skip duplicated order status input eventId=${event.eventId}`);
+      await commitOffset(payload);
+      return;
+    }
+
+    const status = resolveStatus(event.eventType);
+
+    if (!status) {
+      await markProcessedEvent(event.eventId);
+      await commitOffset(payload);
+      return;
+    }
+
+    const upsertResult = await upsertOrderStatus(event, status);
+
+    if (upsertResult.applied) {
+      await publishStatusSnapshot(
+        event,
+        upsertResult.currentStatus,
+        upsertResult.lastEventId,
+        upsertResult.lastUpdatedAt,
+      );
+    }
+
+    await markProcessedEvent(event.eventId);
+    await commitOffset(payload);
+  } catch (rawError) {
+    const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
+    const orderId = event?.orderId ?? readOrderIdFromKey(payload.message);
+
+    const route = await routeToRetryOrDlq(payload, orderId, error);
+
+    if (route.terminal && event) {
+      await markProcessedEvent(event.eventId);
+    }
+
+    await commitOffset(payload);
   }
-
-  await commitOffset(payload);
 }
 
 async function start(): Promise<void> {
@@ -220,68 +342,110 @@ async function start(): Promise<void> {
   await consumer.subscribe({ topic: ORDER_CREATED_EVENT, fromBeginning: true });
   await consumer.subscribe({ topic: paymentEventsTopic, fromBeginning: true });
   await consumer.subscribe({ topic: inventoryEventsTopic, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic5s, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic1m, fromBeginning: true });
+
+  consumer.on(consumer.events.REBALANCING, () => {
+    console.warn(`${serviceName} rebalancing started`);
+  });
+
+  consumer.on(consumer.events.GROUP_JOIN, () => {
+    console.log(`${serviceName} group join completed`);
+  });
 
   console.log(
-    `${serviceName} started: group=${consumerGroup}, inputTopics=${ORDER_CREATED_EVENT},${paymentEventsTopic},${inventoryEventsTopic}, outputTopic=${orderStatusTopic}`,
+    `${serviceName} started: group=${consumerGroup}, inputTopics=${ORDER_CREATED_EVENT},${paymentEventsTopic},${inventoryEventsTopic},${retryPolicy.retryTopic5s},${retryPolicy.retryTopic1m}, outputTopic=${orderStatusTopic}`,
   );
 
-  await consumer.run({
+  runPromise = consumer.run({
     autoCommit: false,
     eachMessage: async (payload) => {
+      if (isShuttingDown) {
+        return;
+      }
+
+      inFlightMessages += 1;
+
       try {
         await handleMessage(payload);
       } catch (error) {
-        if (error instanceof NonRetryableProcessingError) {
-          console.error("order-status-updater skipped non-retryable event", error.message);
-          await commitOffset(payload);
-          return;
-        }
-
         console.error("order-status-updater failed to handle message", error);
+      } finally {
+        inFlightMessages -= 1;
       }
     },
   });
+
+  await runPromise;
 }
 
-let isShuttingDown = false;
+async function waitForInflightDrain(timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
 
-async function shutdown(): Promise<void> {
-  if (isShuttingDown) {
-    return;
+  while (inFlightMessages > 0 && Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+  }
+}
+
+async function shutdown(exitCode = 0): Promise<void> {
+  if (shutdownPromise) {
+    return shutdownPromise;
   }
 
-  isShuttingDown = true;
+  shutdownPromise = (async () => {
+    isShuttingDown = true;
 
-  try {
-    await consumer.disconnect();
-  } catch (error) {
-    console.error("order-status-updater consumer disconnect failed", error);
-  }
+    try {
+      await consumer.stop();
+    } catch (error) {
+      console.error("order-status-updater consumer stop failed", error);
+    }
 
-  try {
-    await producer.disconnect();
-  } catch (error) {
-    console.error("order-status-updater producer disconnect failed", error);
-  }
+    await waitForInflightDrain(30_000);
 
-  try {
-    await pool.end();
-  } catch (error) {
-    console.error("order-status-updater postgres disconnect failed", error);
-  }
+    if (runPromise) {
+      try {
+        await runPromise;
+      } catch (error) {
+        console.error("order-status-updater run loop exited with error", error);
+      }
+    }
 
-  process.exit(0);
+    try {
+      await consumer.disconnect();
+    } catch (error) {
+      console.error("order-status-updater consumer disconnect failed", error);
+    }
+
+    try {
+      await producer.disconnect();
+    } catch (error) {
+      console.error("order-status-updater producer disconnect failed", error);
+    }
+
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error("order-status-updater postgres disconnect failed", error);
+    }
+
+    process.exit(exitCode);
+  })();
+
+  await shutdownPromise;
 }
 
 process.on("SIGINT", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 process.on("SIGTERM", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 void start().catch((error) => {
   console.error("order-status-updater failed to start", error);
-  process.exit(1);
+  void shutdown(1);
 });

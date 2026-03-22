@@ -54,6 +54,12 @@ Feature: `Create Order -> outbox -> publish order.created`.
 1. Không xử lý trùng side effects khi có redelivery.
 2. Lỗi tạm thời đi qua retry, lỗi cứng vào DLQ.
 
+Mapping yêu cầu:
+1. `FR-02`, `FR-03`, `FR-05`
+2. `KR-03`, `KR-04`, `KR-06`, `KR-07`
+3. `DER-03`, `DER-06`
+4. `TR-01`, `TR-02`
+
 ## Phase 4: Schema và contract governance
 
 1. Bật Schema Registry với compatibility `BACKWARD`.

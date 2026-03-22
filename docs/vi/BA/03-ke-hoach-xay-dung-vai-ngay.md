@@ -15,7 +15,7 @@
 ## Ngày 2
 
 - Implement `payment-worker` và `inventory-worker`.
-- Thêm manual commit, dedup table, retry topics, và DLQ.
+- Thêm dedup `processed_events`, manual commit, retry/DLQ chuẩn hóa, và graceful shutdown/rebalance-safe.
 - Implement cập nhật read model cho `order-query-api`.
 
 ## Ngày 3

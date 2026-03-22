@@ -36,12 +36,14 @@
 - Consumer group per worker type
 - `enable.auto.commit=false`
 - Manual commit only after business logic + DB writes succeed
-- Dead-letter metadata fields: `errorType`, `errorMessage`, `failedAt`, `retryCount`
+- Consumer dedup table: `processed_events(event_id, consumer_group)`
+- Dead-letter metadata fields: `errorType`, `errorMessage`, `failedAt`, `retryCount`, `targetWorker`
 
 ## Retry and DLQ policy
 
 - Retryable errors: network timeout, temporary dependency errors.
 - Non-retryable errors: schema invalid, business rule hard-fail.
+- Retry topics are shared; `targetWorker` header routes each retry message to the intended consumer.
 - Backoff route example:
   - attempt 1 fail -> `order.retry.5s`
   - attempt 2 fail -> `order.retry.1m`

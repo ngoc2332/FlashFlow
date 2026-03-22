@@ -24,6 +24,9 @@ Responsibilities:
 - Consume `order.created`.
 - Execute mock payment logic.
 - Emit `payment.succeeded` or `payment.failed`.
+- Deduplicate handled events with `processed_events`.
+- Commit offsets manually only after success/terminal retry-DLQ routing.
+- Handle retry topics (`order.retry.5s`, `order.retry.1m`) and terminal DLQ (`order.dlq`).
 
 Kafka:
 - Consumer group: `payment-workers`
@@ -34,6 +37,9 @@ Responsibilities:
 - Consume `payment.succeeded`.
 - Reserve/reject stock with optimistic locking.
 - Emit `inventory.reserved` or `inventory.rejected`.
+- Deduplicate handled events with `processed_events`.
+- Commit offsets manually only after success/terminal retry-DLQ routing.
+- Handle retry topics (`order.retry.5s`, `order.retry.1m`) and terminal DLQ (`order.dlq`).
 
 Kafka:
 - Consumer group: `inventory-workers`
@@ -56,6 +62,18 @@ Responsibilities:
 
 Input/Output:
 - `GET /orders/{orderId}/status`
+
+## 6) order-status-updater
+
+Responsibilities:
+- Consume status-driving events (`order.created`, `payment.events`, `inventory.events`).
+- Update `order_status_view` and publish `order.status` snapshots.
+- Deduplicate handled events with `processed_events`.
+- Commit offsets manually only after DB upsert and snapshot publish succeed.
+- Handle retry topics (`order.retry.5s`, `order.retry.1m`) and terminal DLQ (`order.dlq`).
+
+Kafka:
+- Consumer group: `order-status-updaters`
 
 ## Event flow summary
 

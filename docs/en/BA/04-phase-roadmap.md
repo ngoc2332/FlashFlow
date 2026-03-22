@@ -54,6 +54,12 @@ Exit criteria:
 1. Redelivery does not create duplicate side effects.
 2. Retryable errors go through retry, terminal errors go to DLQ.
 
+Requirement mapping:
+1. `FR-02`, `FR-03`, `FR-05`
+2. `KR-03`, `KR-04`, `KR-06`, `KR-07`
+3. `DER-03`, `DER-06`
+4. `TR-01`, `TR-02`
+
 ## Phase 4: Schema and contract governance
 
 1. Enable Schema Registry with `BACKWARD` compatibility.

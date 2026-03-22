@@ -15,7 +15,7 @@
 ## Day 2
 
 - Implement `payment-worker` and `inventory-worker`.
-- Add manual commit, dedup table, retry topics, and DLQ.
+- Add `processed_events` dedup, manual commit, standardized retry/DLQ, and graceful shutdown/rebalance-safe handling.
 - Implement `order-query-api` read model updates.
 
 ## Day 3

@@ -1,28 +1,27 @@
 import { randomUUID } from "node:crypto";
 import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
+import { Pool } from "pg";
 import {
   EventEnvelope,
-  OrderCreatedPayload,
+  HeaderValue,
+  NonRetryableProcessingError,
   ORDER_CREATED_EVENT,
+  OrderCreatedPayload,
   PAYMENT_EVENTS_TOPIC,
+  RetryPolicy,
+  RetryableProcessingError,
+  createDeterministicEventId,
   createPaymentFailedEvent,
   createPaymentSucceededEvent,
+  headerToString,
+  nextOffset,
+  normalizeHeaders,
+  parseRetryCount,
+  resolveRetryTarget,
 } from "@flashflow/common";
 
-class RetryableProcessingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "RetryableProcessingError";
-  }
-}
-
-class NonRetryableProcessingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NonRetryableProcessingError";
-  }
-}
-
+const postgresUrl =
+  process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
 const defaultKafkaBrokers = "localhost:9092";
 const brokers = (process.env.KAFKA_BROKERS ?? defaultKafkaBrokers)
   .split(",")
@@ -33,41 +32,31 @@ const serviceName = process.env.PAYMENT_SERVICE_NAME ?? "payment-worker";
 const clientId = process.env.PAYMENT_CLIENT_ID ?? "flashflow-payment-worker";
 const consumerGroup = process.env.PAYMENT_CONSUMER_GROUP ?? "payment-workers";
 const paymentEventsTopic = process.env.PAYMENT_EVENTS_TOPIC ?? PAYMENT_EVENTS_TOPIC;
-const retryTopic5s = process.env.RETRY_TOPIC_5S ?? "order.retry.5s";
-const retryTopic1m = process.env.RETRY_TOPIC_1M ?? "order.retry.1m";
-const dlqTopic = process.env.ORDER_DLQ_TOPIC ?? "order.dlq";
+
+const retryPolicy: RetryPolicy = {
+  retryTopic5s: process.env.RETRY_TOPIC_5S ?? "order.retry.5s",
+  retryTopic1m: process.env.RETRY_TOPIC_1M ?? "order.retry.1m",
+  dlqTopic: process.env.ORDER_DLQ_TOPIC ?? "order.dlq",
+};
+
 const failUserPrefix = process.env.PAYMENT_FAIL_USER_PREFIX ?? "fail-payment";
 
 const parsedApprovalLimit = Number(process.env.PAYMENT_APPROVAL_LIMIT ?? 1000);
-const approvalLimit = Number.isFinite(parsedApprovalLimit) && parsedApprovalLimit > 0 ? parsedApprovalLimit : 1000;
+const approvalLimit =
+  Number.isFinite(parsedApprovalLimit) && parsedApprovalLimit > 0 ? parsedApprovalLimit : 1000;
 
 const kafka = new Kafka({ clientId, brokers });
+const pool = new Pool({ connectionString: postgresUrl });
 const consumer: Consumer = kafka.consumer({ groupId: consumerGroup });
 const producer: Producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
 
-type HeaderValue = Buffer | string | undefined;
+let isShuttingDown = false;
+let inFlightMessages = 0;
+let runPromise: Promise<void> | undefined;
+let shutdownPromise: Promise<void> | undefined;
 
-function headerToString(value: HeaderValue): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (Buffer.isBuffer(value)) {
-    return value.toString("utf8");
-  }
-
-  return undefined;
-}
-
-function parseRetryCount(headers: Record<string, HeaderValue> | undefined): number {
-  const raw = headers ? headerToString(headers.retryCount) : undefined;
-  const retryCount = Number(raw ?? 0);
-
-  if (!Number.isInteger(retryCount) || retryCount < 0) {
-    return 0;
-  }
-
-  return retryCount;
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
@@ -80,23 +69,6 @@ function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
   }
 
   return "unknown-order";
-}
-
-function normalizeHeaders(headers: Record<string, HeaderValue> | undefined): Record<string, string> {
-  if (!headers) {
-    return {};
-  }
-
-  const normalized: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(headers)) {
-    const parsed = headerToString(value);
-    if (parsed !== undefined) {
-      normalized[key] = parsed;
-    }
-  }
-
-  return normalized;
 }
 
 function parseOrderCreatedEvent(rawValue: Buffer | null): EventEnvelope<OrderCreatedPayload> {
@@ -123,8 +95,12 @@ function parseOrderCreatedEvent(rawValue: Buffer | null): EventEnvelope<OrderCre
     throw new NonRetryableProcessingError(`Unsupported eventType: ${String(event.eventType)}`);
   }
 
-  if (typeof event.orderId !== "string" || event.orderId.trim().length === 0) {
-    throw new NonRetryableProcessingError("orderId is required");
+  if (typeof event.eventId !== "string" || !isUuid(event.eventId)) {
+    throw new NonRetryableProcessingError("eventId must be a valid UUID");
+  }
+
+  if (typeof event.orderId !== "string" || !isUuid(event.orderId)) {
+    throw new NonRetryableProcessingError("orderId must be a valid UUID");
   }
 
   if (!event.payload || typeof event.payload !== "object") {
@@ -137,14 +113,19 @@ function parseOrderCreatedEvent(rawValue: Buffer | null): EventEnvelope<OrderCre
     throw new NonRetryableProcessingError("payload.userId is required");
   }
 
-  if (typeof payload.totalAmount !== "number" || !Number.isFinite(payload.totalAmount) || payload.totalAmount <= 0) {
+  if (
+    typeof payload.totalAmount !== "number" ||
+    !Number.isFinite(payload.totalAmount) ||
+    payload.totalAmount <= 0
+  ) {
     throw new NonRetryableProcessingError("payload.totalAmount must be a number > 0");
   }
 
-  const traceId = typeof event.traceId === "string" && event.traceId.trim().length > 0 ? event.traceId : randomUUID();
+  const traceId =
+    typeof event.traceId === "string" && event.traceId.trim().length > 0 ? event.traceId : randomUUID();
 
   return {
-    eventId: typeof event.eventId === "string" && event.eventId.trim().length > 0 ? event.eventId : randomUUID(),
+    eventId: event.eventId,
     eventKind: event.eventKind === "domain" ? "domain" : "integration",
     eventType: ORDER_CREATED_EVENT,
     orderId: event.orderId,
@@ -187,26 +168,6 @@ function decidePayment(event: EventEnvelope<OrderCreatedPayload>): PaymentDecisi
   return { status: "succeeded" };
 }
 
-function resolveFailureTopic(error: Error, retryCount: number): string {
-  if (!(error instanceof RetryableProcessingError)) {
-    return dlqTopic;
-  }
-
-  if (retryCount === 0) {
-    return retryTopic5s;
-  }
-
-  if (retryCount === 1) {
-    return retryTopic1m;
-  }
-
-  return dlqTopic;
-}
-
-function nextOffset(offset: string): string {
-  return (BigInt(offset) + 1n).toString();
-}
-
 async function commitOffset(payload: EachMessagePayload): Promise<void> {
   await consumer.commitOffsets([
     {
@@ -217,16 +178,47 @@ async function commitOffset(payload: EachMessagePayload): Promise<void> {
   ]);
 }
 
-async function publishOutcome(event: EventEnvelope<OrderCreatedPayload>, decision: PaymentDecision): Promise<void> {
+async function hasProcessedEvent(eventId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1
+     FROM processed_events
+     WHERE event_id = $1::uuid
+       AND consumer_group = $2
+     LIMIT 1`,
+    [eventId, consumerGroup],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function markProcessedEvent(eventId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO processed_events (event_id, consumer_group, processed_at)
+     VALUES ($1::uuid, $2, NOW())
+     ON CONFLICT (event_id, consumer_group) DO NOTHING`,
+    [eventId, consumerGroup],
+  );
+}
+
+async function publishOutcome(
+  event: EventEnvelope<OrderCreatedPayload>,
+  decision: PaymentDecision,
+): Promise<void> {
+  const outputEventType =
+    decision.status === "succeeded" ? "payment.succeeded" : "payment.failed";
+  const outputEventId = createDeterministicEventId(`${event.eventId}:${outputEventType}`);
+
   const paymentEvent =
     decision.status === "succeeded"
       ? createPaymentSucceededEvent({
+          eventId: outputEventId,
           orderId: event.orderId,
           userId: event.payload.userId,
           totalAmount: event.payload.totalAmount,
           traceId: event.traceId,
         })
       : createPaymentFailedEvent({
+          eventId: outputEventId,
           orderId: event.orderId,
           userId: event.payload.userId,
           totalAmount: event.payload.totalAmount,
@@ -257,25 +249,26 @@ async function publishOutcome(event: EventEnvelope<OrderCreatedPayload>, decisio
   );
 }
 
-async function routeToRetryOrDlq(payload: EachMessagePayload, orderId: string, error: Error): Promise<void> {
-  const retryCount = parseRetryCount(payload.message.headers as Record<string, HeaderValue> | undefined);
-  const targetTopic = resolveFailureTopic(error, retryCount);
-  const normalizedHeaders = normalizeHeaders(
-    payload.message.headers as Record<string, HeaderValue> | undefined,
-  );
-
-  const nextRetryCount = error instanceof RetryableProcessingError ? retryCount + 1 : retryCount;
+async function routeToRetryOrDlq(
+  payload: EachMessagePayload,
+  orderId: string,
+  error: Error,
+): Promise<{ terminal: boolean; targetTopic: string }> {
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const retryCount = parseRetryCount(headers);
+  const route = resolveRetryTarget(error, retryCount, retryPolicy);
+  const normalizedHeaders = normalizeHeaders(headers);
   const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
 
   await producer.send({
-    topic: targetTopic,
+    topic: route.topic,
     messages: [
       {
         key: orderId,
         value: messageValue,
         headers: {
           ...normalizedHeaders,
-          retryCount: String(nextRetryCount),
+          retryCount: String(route.nextRetryCount),
           sourceTopic: payload.topic,
           sourceService: serviceName,
           targetWorker: serviceName,
@@ -287,17 +280,19 @@ async function routeToRetryOrDlq(payload: EachMessagePayload, orderId: string, e
     ],
   });
 
-  await commitOffset(payload);
-
   console.error(
-    `routed order ${orderId} to ${targetTopic} after error ${error.name}: ${error.message}`,
+    `routed order ${orderId} to ${route.topic} after error ${error.name}: ${error.message}`,
   );
+
+  return {
+    terminal: route.terminal,
+    targetTopic: route.topic,
+  };
 }
 
 async function handleMessage(payload: EachMessagePayload): Promise<void> {
-  const targetWorker = headerToString(
-    (payload.message.headers as Record<string, HeaderValue> | undefined)?.targetWorker,
-  );
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const targetWorker = headerToString(headers?.targetWorker);
 
   if (payload.topic !== ORDER_CREATED_EVENT && targetWorker !== serviceName) {
     await commitOffset(payload);
@@ -308,15 +303,28 @@ async function handleMessage(payload: EachMessagePayload): Promise<void> {
 
   try {
     event = parseOrderCreatedEvent(payload.message.value);
-    const decision = decidePayment(event);
 
+    if (await hasProcessedEvent(event.eventId)) {
+      console.log(`skip duplicated order.created eventId=${event.eventId}`);
+      await commitOffset(payload);
+      return;
+    }
+
+    const decision = decidePayment(event);
     await publishOutcome(event, decision);
+    await markProcessedEvent(event.eventId);
     await commitOffset(payload);
   } catch (rawError) {
     const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
     const orderId = event?.orderId ?? readOrderIdFromKey(payload.message);
 
-    await routeToRetryOrDlq(payload, orderId, error);
+    const route = await routeToRetryOrDlq(payload, orderId, error);
+
+    if (route.terminal && event) {
+      await markProcessedEvent(event.eventId);
+    }
+
+    await commitOffset(payload);
   }
 }
 
@@ -325,58 +333,110 @@ async function start(): Promise<void> {
   await consumer.connect();
 
   await consumer.subscribe({ topic: ORDER_CREATED_EVENT, fromBeginning: true });
-  await consumer.subscribe({ topic: retryTopic5s, fromBeginning: true });
-  await consumer.subscribe({ topic: retryTopic1m, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic5s, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic1m, fromBeginning: true });
+
+  consumer.on(consumer.events.REBALANCING, () => {
+    console.warn(`${serviceName} rebalancing started`);
+  });
+
+  consumer.on(consumer.events.GROUP_JOIN, () => {
+    console.log(`${serviceName} group join completed`);
+  });
 
   console.log(
-    `${serviceName} started: group=${consumerGroup}, inputTopics=${ORDER_CREATED_EVENT},${retryTopic5s},${retryTopic1m}, outputTopic=${paymentEventsTopic}`,
+    `${serviceName} started: group=${consumerGroup}, inputTopics=${ORDER_CREATED_EVENT},${retryPolicy.retryTopic5s},${retryPolicy.retryTopic1m}, outputTopic=${paymentEventsTopic}`,
   );
 
-  await consumer.run({
+  runPromise = consumer.run({
     autoCommit: false,
     eachMessage: async (payload) => {
+      if (isShuttingDown) {
+        return;
+      }
+
+      inFlightMessages += 1;
+
       try {
         await handleMessage(payload);
       } catch (error) {
         console.error("payment-worker failed to handle message", error);
+      } finally {
+        inFlightMessages -= 1;
       }
     },
   });
+
+  await runPromise;
 }
 
-let isShuttingDown = false;
+async function waitForInflightDrain(timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
 
-async function shutdown(): Promise<void> {
-  if (isShuttingDown) {
-    return;
+  while (inFlightMessages > 0 && Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+  }
+}
+
+async function shutdown(exitCode = 0): Promise<void> {
+  if (shutdownPromise) {
+    return shutdownPromise;
   }
 
-  isShuttingDown = true;
+  shutdownPromise = (async () => {
+    isShuttingDown = true;
 
-  try {
-    await consumer.disconnect();
-  } catch (error) {
-    console.error("payment-worker consumer disconnect failed", error);
-  }
+    try {
+      await consumer.stop();
+    } catch (error) {
+      console.error("payment-worker consumer stop failed", error);
+    }
 
-  try {
-    await producer.disconnect();
-  } catch (error) {
-    console.error("payment-worker producer disconnect failed", error);
-  }
+    await waitForInflightDrain(30_000);
 
-  process.exit(0);
+    if (runPromise) {
+      try {
+        await runPromise;
+      } catch (error) {
+        console.error("payment-worker run loop exited with error", error);
+      }
+    }
+
+    try {
+      await consumer.disconnect();
+    } catch (error) {
+      console.error("payment-worker consumer disconnect failed", error);
+    }
+
+    try {
+      await producer.disconnect();
+    } catch (error) {
+      console.error("payment-worker producer disconnect failed", error);
+    }
+
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error("payment-worker postgres disconnect failed", error);
+    }
+
+    process.exit(exitCode);
+  })();
+
+  await shutdownPromise;
 }
 
 process.on("SIGINT", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 process.on("SIGTERM", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 void start().catch((error) => {
   console.error("payment-worker failed to start", error);
-  process.exit(1);
+  void shutdown(1);
 });

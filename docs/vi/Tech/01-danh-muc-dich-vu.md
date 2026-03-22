@@ -24,6 +24,9 @@ Trách nhiệm:
 - Consume `order.created`.
 - Chạy logic thanh toán mock.
 - Phát `payment.succeeded` hoặc `payment.failed`.
+- Dedup event đã xử lý qua `processed_events`.
+- Manual commit offset chỉ sau khi xử lý thành công hoặc route retry/DLQ terminal.
+- Xử lý retry topics (`order.retry.5s`, `order.retry.1m`) và DLQ cuối (`order.dlq`).
 
 Kafka:
 - Consumer group: `payment-workers`
@@ -34,6 +37,9 @@ Trách nhiệm:
 - Consume `payment.succeeded`.
 - Reserve/reject tồn kho bằng optimistic locking.
 - Phát `inventory.reserved` hoặc `inventory.rejected`.
+- Dedup event đã xử lý qua `processed_events`.
+- Manual commit offset chỉ sau khi xử lý thành công hoặc route retry/DLQ terminal.
+- Xử lý retry topics (`order.retry.5s`, `order.retry.1m`) và DLQ cuối (`order.dlq`).
 
 Kafka:
 - Consumer group: `inventory-workers`
@@ -56,6 +62,18 @@ Trách nhiệm:
 
 Input/Output:
 - `GET /orders/{orderId}/status`
+
+## 6) order-status-updater
+
+Trách nhiệm:
+- Consume các event điều khiển trạng thái (`order.created`, `payment.events`, `inventory.events`).
+- Cập nhật `order_status_view` và publish snapshot `order.status`.
+- Dedup event đã xử lý qua `processed_events`.
+- Manual commit offset chỉ sau khi upsert DB + publish snapshot thành công.
+- Xử lý retry topics (`order.retry.5s`, `order.retry.1m`) và DLQ cuối (`order.dlq`).
+
+Kafka:
+- Consumer group: `order-status-updaters`
 
 ## Tóm tắt luồng event
 

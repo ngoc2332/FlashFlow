@@ -46,6 +46,7 @@ export interface InventoryRejectedPayload {
 }
 
 export interface CreateOrderCreatedEventInput {
+  eventId?: string;
   orderId: string;
   userId: string;
   totalAmount: number;
@@ -53,6 +54,7 @@ export interface CreateOrderCreatedEventInput {
 }
 
 export interface CreatePaymentSucceededEventInput {
+  eventId?: string;
   orderId: string;
   userId: string;
   totalAmount: number;
@@ -62,6 +64,7 @@ export interface CreatePaymentSucceededEventInput {
 }
 
 export interface CreatePaymentFailedEventInput {
+  eventId?: string;
   orderId: string;
   userId: string;
   totalAmount: number;
@@ -71,6 +74,7 @@ export interface CreatePaymentFailedEventInput {
 }
 
 export interface CreateInventoryReservedEventInput {
+  eventId?: string;
   orderId: string;
   userId: string;
   totalAmount: number;
@@ -80,6 +84,7 @@ export interface CreateInventoryReservedEventInput {
 }
 
 export interface CreateInventoryRejectedEventInput {
+  eventId?: string;
   orderId: string;
   userId: string;
   totalAmount: number;
@@ -96,13 +101,14 @@ export const INVENTORY_REJECTED_EVENT = "inventory.rejected";
 export const INVENTORY_EVENTS_TOPIC = "inventory.events";
 
 function createIntegrationEvent<T>(input: {
+  eventId?: string;
   eventType: string;
   orderId: string;
   traceId?: string;
   payload: T;
 }): EventEnvelope<T> {
   return {
-    eventId: randomUUID(),
+    eventId: input.eventId ?? randomUUID(),
     eventKind: "integration",
     eventType: input.eventType,
     orderId: input.orderId,
@@ -117,6 +123,7 @@ export function createOrderCreatedEvent(
   input: CreateOrderCreatedEventInput,
 ): EventEnvelope<OrderCreatedPayload> {
   return createIntegrationEvent<OrderCreatedPayload>({
+    eventId: input.eventId,
     eventType: ORDER_CREATED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
@@ -131,6 +138,7 @@ export function createPaymentSucceededEvent(
   input: CreatePaymentSucceededEventInput,
 ): EventEnvelope<PaymentSucceededPayload> {
   return createIntegrationEvent<PaymentSucceededPayload>({
+    eventId: input.eventId,
     eventType: PAYMENT_SUCCEEDED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
@@ -147,6 +155,7 @@ export function createPaymentFailedEvent(
   input: CreatePaymentFailedEventInput,
 ): EventEnvelope<PaymentFailedPayload> {
   return createIntegrationEvent<PaymentFailedPayload>({
+    eventId: input.eventId,
     eventType: PAYMENT_FAILED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
@@ -163,6 +172,7 @@ export function createInventoryReservedEvent(
   input: CreateInventoryReservedEventInput,
 ): EventEnvelope<InventoryReservedPayload> {
   return createIntegrationEvent<InventoryReservedPayload>({
+    eventId: input.eventId,
     eventType: INVENTORY_RESERVED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
@@ -179,6 +189,7 @@ export function createInventoryRejectedEvent(
   input: CreateInventoryRejectedEventInput,
 ): EventEnvelope<InventoryRejectedPayload> {
   return createIntegrationEvent<InventoryRejectedPayload>({
+    eventId: input.eventId,
     eventType: INVENTORY_REJECTED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
@@ -189,3 +200,5 @@ export function createInventoryRejectedEvent(
     },
   });
 }
+
+export * from "./reliability";

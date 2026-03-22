@@ -1,22 +1,28 @@
 import { randomUUID } from "node:crypto";
 import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
+import { Pool } from "pg";
 import {
   EventEnvelope,
+  HeaderValue,
   INVENTORY_EVENTS_TOPIC,
+  NonRetryableProcessingError,
   PAYMENT_EVENTS_TOPIC,
   PAYMENT_SUCCEEDED_EVENT,
   PaymentSucceededPayload,
+  RetryPolicy,
+  RetryableProcessingError,
+  createDeterministicEventId,
   createInventoryRejectedEvent,
   createInventoryReservedEvent,
+  headerToString,
+  nextOffset,
+  normalizeHeaders,
+  parseRetryCount,
+  resolveRetryTarget,
 } from "@flashflow/common";
 
-class NonRetryableProcessingError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "NonRetryableProcessingError";
-  }
-}
-
+const postgresUrl =
+  process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
 const brokers = (process.env.KAFKA_BROKERS ?? "localhost:9092")
   .split(",")
   .map((item) => item.trim())
@@ -28,40 +34,41 @@ const consumerGroup = process.env.INVENTORY_CONSUMER_GROUP ?? "inventory-workers
 const paymentEventsTopic = process.env.PAYMENT_EVENTS_TOPIC ?? PAYMENT_EVENTS_TOPIC;
 const inventoryEventsTopic = process.env.INVENTORY_EVENTS_TOPIC ?? INVENTORY_EVENTS_TOPIC;
 const rejectUserPrefix = process.env.INVENTORY_REJECT_USER_PREFIX ?? "reject-inventory";
+const failUserPrefix = process.env.INVENTORY_FAIL_USER_PREFIX ?? "fail-inventory";
+
+const retryPolicy: RetryPolicy = {
+  retryTopic5s: process.env.RETRY_TOPIC_5S ?? "order.retry.5s",
+  retryTopic1m: process.env.RETRY_TOPIC_1M ?? "order.retry.1m",
+  dlqTopic: process.env.ORDER_DLQ_TOPIC ?? "order.dlq",
+};
 
 const rawReserveLimit = Number(process.env.INVENTORY_RESERVE_LIMIT ?? 800);
 const reserveLimit = Number.isFinite(rawReserveLimit) && rawReserveLimit > 0 ? rawReserveLimit : 800;
 
 const kafka = new Kafka({ clientId, brokers });
+const pool = new Pool({ connectionString: postgresUrl });
 const consumer: Consumer = kafka.consumer({ groupId: consumerGroup });
 const producer: Producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
 
-type HeaderValue = Buffer | string | undefined;
+let isShuttingDown = false;
+let inFlightMessages = 0;
+let runPromise: Promise<void> | undefined;
+let shutdownPromise: Promise<void> | undefined;
 
-function headerToString(value: HeaderValue): string | undefined {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  if (Buffer.isBuffer(value)) {
-    return value.toString("utf8");
-  }
-
-  return undefined;
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
-function nextOffset(offset: string): string {
-  return (BigInt(offset) + 1n).toString();
-}
+function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
+  if (Buffer.isBuffer(message.key)) {
+    return message.key.toString("utf8");
+  }
 
-async function commitOffset(payload: EachMessagePayload): Promise<void> {
-  await consumer.commitOffsets([
-    {
-      topic: payload.topic,
-      partition: payload.partition,
-      offset: nextOffset(payload.message.offset),
-    },
-  ]);
+  if (typeof message.key === "string") {
+    return message.key;
+  }
+
+  return "unknown-order";
 }
 
 function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
@@ -84,8 +91,12 @@ function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
 
   const event = parsed as Partial<EventEnvelope<unknown>>;
 
-  if (typeof event.orderId !== "string" || event.orderId.trim().length === 0) {
-    throw new NonRetryableProcessingError("orderId is required");
+  if (typeof event.eventId !== "string" || !isUuid(event.eventId)) {
+    throw new NonRetryableProcessingError("eventId must be a valid UUID");
+  }
+
+  if (typeof event.orderId !== "string" || !isUuid(event.orderId)) {
+    throw new NonRetryableProcessingError("orderId must be a valid UUID");
   }
 
   if (typeof event.eventType !== "string" || event.eventType.trim().length === 0) {
@@ -93,10 +104,7 @@ function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
   }
 
   return {
-    eventId:
-      typeof event.eventId === "string" && event.eventId.trim().length > 0
-        ? event.eventId
-        : randomUUID(),
+    eventId: event.eventId,
     eventKind: event.eventKind === "domain" ? "domain" : "integration",
     eventType: event.eventType,
     orderId: event.orderId,
@@ -113,7 +121,9 @@ function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
   };
 }
 
-function parsePaymentSucceededEvent(event: EventEnvelope<unknown>): EventEnvelope<PaymentSucceededPayload> | undefined {
+function parsePaymentSucceededEvent(
+  event: EventEnvelope<unknown>,
+): EventEnvelope<PaymentSucceededPayload> | undefined {
   if (event.eventType !== PAYMENT_SUCCEEDED_EVENT) {
     return undefined;
   }
@@ -128,8 +138,14 @@ function parsePaymentSucceededEvent(event: EventEnvelope<unknown>): EventEnvelop
     throw new NonRetryableProcessingError("payment.succeeded payload.userId is required");
   }
 
-  if (typeof payload.totalAmount !== "number" || !Number.isFinite(payload.totalAmount) || payload.totalAmount <= 0) {
-    throw new NonRetryableProcessingError("payment.succeeded payload.totalAmount must be a number > 0");
+  if (
+    typeof payload.totalAmount !== "number" ||
+    !Number.isFinite(payload.totalAmount) ||
+    payload.totalAmount <= 0
+  ) {
+    throw new NonRetryableProcessingError(
+      "payment.succeeded payload.totalAmount must be a number > 0",
+    );
   }
 
   return {
@@ -159,6 +175,10 @@ type InventoryDecision =
     };
 
 function decideInventory(event: EventEnvelope<PaymentSucceededPayload>): InventoryDecision {
+  if (event.payload.userId.startsWith(failUserPrefix)) {
+    throw new RetryableProcessingError("Mock inventory service timeout");
+  }
+
   if (event.payload.userId.startsWith(rejectUserPrefix)) {
     return {
       status: "rejected",
@@ -176,19 +196,57 @@ function decideInventory(event: EventEnvelope<PaymentSucceededPayload>): Invento
   return { status: "reserved" };
 }
 
+async function commitOffset(payload: EachMessagePayload): Promise<void> {
+  await consumer.commitOffsets([
+    {
+      topic: payload.topic,
+      partition: payload.partition,
+      offset: nextOffset(payload.message.offset),
+    },
+  ]);
+}
+
+async function hasProcessedEvent(eventId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT 1
+     FROM processed_events
+     WHERE event_id = $1::uuid
+       AND consumer_group = $2
+     LIMIT 1`,
+    [eventId, consumerGroup],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+async function markProcessedEvent(eventId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO processed_events (event_id, consumer_group, processed_at)
+     VALUES ($1::uuid, $2, NOW())
+     ON CONFLICT (event_id, consumer_group) DO NOTHING`,
+    [eventId, consumerGroup],
+  );
+}
+
 async function publishOutcome(
   event: EventEnvelope<PaymentSucceededPayload>,
   decision: InventoryDecision,
 ): Promise<void> {
+  const outputEventType =
+    decision.status === "reserved" ? "inventory.reserved" : "inventory.rejected";
+  const outputEventId = createDeterministicEventId(`${event.eventId}:${outputEventType}`);
+
   const inventoryEvent =
     decision.status === "reserved"
       ? createInventoryReservedEvent({
+          eventId: outputEventId,
           orderId: event.orderId,
           userId: event.payload.userId,
           totalAmount: event.payload.totalAmount,
           traceId: event.traceId,
         })
       : createInventoryRejectedEvent({
+          eventId: outputEventId,
           orderId: event.orderId,
           userId: event.payload.userId,
           totalAmount: event.payload.totalAmount,
@@ -218,90 +276,202 @@ async function publishOutcome(
   );
 }
 
-async function handleMessage(payload: EachMessagePayload): Promise<void> {
-  const targetWorker = headerToString(
-    (payload.message.headers as Record<string, HeaderValue> | undefined)?.targetWorker,
+async function routeToRetryOrDlq(
+  payload: EachMessagePayload,
+  orderId: string,
+  error: Error,
+): Promise<{ terminal: boolean; targetTopic: string }> {
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const retryCount = parseRetryCount(headers);
+  const route = resolveRetryTarget(error, retryCount, retryPolicy);
+  const normalizedHeaders = normalizeHeaders(headers);
+  const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
+
+  await producer.send({
+    topic: route.topic,
+    messages: [
+      {
+        key: orderId,
+        value: messageValue,
+        headers: {
+          ...normalizedHeaders,
+          retryCount: String(route.nextRetryCount),
+          sourceTopic: payload.topic,
+          sourceService: serviceName,
+          targetWorker: serviceName,
+          errorType: error.name,
+          errorMessage: error.message,
+          failedAt: new Date().toISOString(),
+        },
+      },
+    ],
+  });
+
+  console.error(
+    `routed order ${orderId} to ${route.topic} after error ${error.name}: ${error.message}`,
   );
 
-  if (targetWorker && targetWorker !== serviceName) {
+  return {
+    terminal: route.terminal,
+    targetTopic: route.topic,
+  };
+}
+
+async function handleMessage(payload: EachMessagePayload): Promise<void> {
+  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
+  const targetWorker = headerToString(headers?.targetWorker);
+
+  if (payload.topic !== paymentEventsTopic && targetWorker !== serviceName) {
     await commitOffset(payload);
     return;
   }
 
-  const envelope = parseEnvelope(payload.message.value);
-  const paymentSucceededEvent = parsePaymentSucceededEvent(envelope);
+  let envelope: EventEnvelope<unknown> | undefined;
 
-  if (!paymentSucceededEvent) {
+  try {
+    envelope = parseEnvelope(payload.message.value);
+
+    if (await hasProcessedEvent(envelope.eventId)) {
+      console.log(`skip duplicated inventory input eventId=${envelope.eventId}`);
+      await commitOffset(payload);
+      return;
+    }
+
+    const paymentSucceededEvent = parsePaymentSucceededEvent(envelope);
+
+    if (!paymentSucceededEvent) {
+      await commitOffset(payload);
+      return;
+    }
+
+    const decision = decideInventory(paymentSucceededEvent);
+
+    await publishOutcome(paymentSucceededEvent, decision);
+    await markProcessedEvent(envelope.eventId);
     await commitOffset(payload);
-    return;
+  } catch (rawError) {
+    const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
+    const orderId = envelope?.orderId ?? readOrderIdFromKey(payload.message);
+
+    const route = await routeToRetryOrDlq(payload, orderId, error);
+
+    if (route.terminal && envelope) {
+      await markProcessedEvent(envelope.eventId);
+    }
+
+    await commitOffset(payload);
   }
-
-  const decision = decideInventory(paymentSucceededEvent);
-
-  await publishOutcome(paymentSucceededEvent, decision);
-  await commitOffset(payload);
 }
 
 async function start(): Promise<void> {
   await producer.connect();
   await consumer.connect();
+
   await consumer.subscribe({ topic: paymentEventsTopic, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic5s, fromBeginning: true });
+  await consumer.subscribe({ topic: retryPolicy.retryTopic1m, fromBeginning: true });
+
+  consumer.on(consumer.events.REBALANCING, () => {
+    console.warn(`${serviceName} rebalancing started`);
+  });
+
+  consumer.on(consumer.events.GROUP_JOIN, () => {
+    console.log(`${serviceName} group join completed`);
+  });
 
   console.log(
-    `${serviceName} started: group=${consumerGroup}, inputTopic=${paymentEventsTopic}, outputTopic=${inventoryEventsTopic}`,
+    `${serviceName} started: group=${consumerGroup}, inputTopics=${paymentEventsTopic},${retryPolicy.retryTopic5s},${retryPolicy.retryTopic1m}, outputTopic=${inventoryEventsTopic}`,
   );
 
-  await consumer.run({
+  runPromise = consumer.run({
     autoCommit: false,
     eachMessage: async (payload) => {
+      if (isShuttingDown) {
+        return;
+      }
+
+      inFlightMessages += 1;
+
       try {
         await handleMessage(payload);
       } catch (error) {
-        if (error instanceof NonRetryableProcessingError) {
-          console.error("inventory-worker skipped non-retryable event", error.message);
-          await commitOffset(payload);
-          return;
-        }
-
         console.error("inventory-worker failed to handle message", error);
+      } finally {
+        inFlightMessages -= 1;
       }
     },
   });
+
+  await runPromise;
 }
 
-let isShuttingDown = false;
+async function waitForInflightDrain(timeoutMs: number): Promise<void> {
+  const startedAt = Date.now();
 
-async function shutdown(): Promise<void> {
-  if (isShuttingDown) {
-    return;
+  while (inFlightMessages > 0 && Date.now() - startedAt < timeoutMs) {
+    await new Promise((resolve) => {
+      setTimeout(resolve, 100);
+    });
+  }
+}
+
+async function shutdown(exitCode = 0): Promise<void> {
+  if (shutdownPromise) {
+    return shutdownPromise;
   }
 
-  isShuttingDown = true;
+  shutdownPromise = (async () => {
+    isShuttingDown = true;
 
-  try {
-    await consumer.disconnect();
-  } catch (error) {
-    console.error("inventory-worker consumer disconnect failed", error);
-  }
+    try {
+      await consumer.stop();
+    } catch (error) {
+      console.error("inventory-worker consumer stop failed", error);
+    }
 
-  try {
-    await producer.disconnect();
-  } catch (error) {
-    console.error("inventory-worker producer disconnect failed", error);
-  }
+    await waitForInflightDrain(30_000);
 
-  process.exit(0);
+    if (runPromise) {
+      try {
+        await runPromise;
+      } catch (error) {
+        console.error("inventory-worker run loop exited with error", error);
+      }
+    }
+
+    try {
+      await consumer.disconnect();
+    } catch (error) {
+      console.error("inventory-worker consumer disconnect failed", error);
+    }
+
+    try {
+      await producer.disconnect();
+    } catch (error) {
+      console.error("inventory-worker producer disconnect failed", error);
+    }
+
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error("inventory-worker postgres disconnect failed", error);
+    }
+
+    process.exit(exitCode);
+  })();
+
+  await shutdownPromise;
 }
 
 process.on("SIGINT", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 process.on("SIGTERM", () => {
-  void shutdown();
+  void shutdown(0);
 });
 
 void start().catch((error) => {
   console.error("inventory-worker failed to start", error);
-  process.exit(1);
+  void shutdown(1);
 });

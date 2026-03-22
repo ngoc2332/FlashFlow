@@ -36,12 +36,14 @@
 - Mỗi loại worker có consumer group riêng
 - `enable.auto.commit=false`
 - Manual commit chỉ sau khi business logic + DB writes thành công
-- Metadata cho dead-letter: `errorType`, `errorMessage`, `failedAt`, `retryCount`
+- Bảng dedup consumer: `processed_events(event_id, consumer_group)`
+- Metadata cho dead-letter: `errorType`, `errorMessage`, `failedAt`, `retryCount`, `targetWorker`
 
 ## Chính sách retry và DLQ
 
 - Retryable errors: network timeout, dependency tạm thời lỗi.
 - Non-retryable errors: schema sai, hard-fail business rule.
+- Retry topics dùng chung; header `targetWorker` định tuyến retry về đúng consumer.
 - Ví dụ route backoff:
   - lần 1 lỗi -> `order.retry.5s`
   - lần 2 lỗi -> `order.retry.1m`
