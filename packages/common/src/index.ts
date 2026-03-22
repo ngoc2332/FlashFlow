@@ -32,6 +32,19 @@ export interface PaymentFailedPayload {
   retryable: boolean;
 }
 
+export interface InventoryReservedPayload {
+  userId: string;
+  totalAmount: number;
+  reservationId: string;
+  warehouse: string;
+}
+
+export interface InventoryRejectedPayload {
+  userId: string;
+  totalAmount: number;
+  reason: string;
+}
+
 export interface CreateOrderCreatedEventInput {
   orderId: string;
   userId: string;
@@ -57,10 +70,30 @@ export interface CreatePaymentFailedEventInput {
   traceId?: string;
 }
 
+export interface CreateInventoryReservedEventInput {
+  orderId: string;
+  userId: string;
+  totalAmount: number;
+  traceId?: string;
+  reservationId?: string;
+  warehouse?: string;
+}
+
+export interface CreateInventoryRejectedEventInput {
+  orderId: string;
+  userId: string;
+  totalAmount: number;
+  reason: string;
+  traceId?: string;
+}
+
 export const ORDER_CREATED_EVENT = "order.created";
 export const PAYMENT_SUCCEEDED_EVENT = "payment.succeeded";
 export const PAYMENT_FAILED_EVENT = "payment.failed";
 export const PAYMENT_EVENTS_TOPIC = "payment.events";
+export const INVENTORY_RESERVED_EVENT = "inventory.reserved";
+export const INVENTORY_REJECTED_EVENT = "inventory.rejected";
+export const INVENTORY_EVENTS_TOPIC = "inventory.events";
 
 function createIntegrationEvent<T>(input: {
   eventType: string;
@@ -122,6 +155,37 @@ export function createPaymentFailedEvent(
       totalAmount: input.totalAmount,
       reason: input.reason,
       retryable: input.retryable,
+    },
+  });
+}
+
+export function createInventoryReservedEvent(
+  input: CreateInventoryReservedEventInput,
+): EventEnvelope<InventoryReservedPayload> {
+  return createIntegrationEvent<InventoryReservedPayload>({
+    eventType: INVENTORY_RESERVED_EVENT,
+    orderId: input.orderId,
+    traceId: input.traceId,
+    payload: {
+      userId: input.userId,
+      totalAmount: input.totalAmount,
+      reservationId: input.reservationId ?? randomUUID(),
+      warehouse: input.warehouse ?? "mock-wh-1",
+    },
+  });
+}
+
+export function createInventoryRejectedEvent(
+  input: CreateInventoryRejectedEventInput,
+): EventEnvelope<InventoryRejectedPayload> {
+  return createIntegrationEvent<InventoryRejectedPayload>({
+    eventType: INVENTORY_REJECTED_EVENT,
+    orderId: input.orderId,
+    traceId: input.traceId,
+    payload: {
+      userId: input.userId,
+      totalAmount: input.totalAmount,
+      reason: input.reason,
     },
   });
 }

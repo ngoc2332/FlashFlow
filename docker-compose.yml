@@ -98,6 +98,21 @@ services:
     ports:
       - "3000:3000"
 
+  order-query-api:
+    profiles: ["phase2"]
+    build:
+      context: .
+      dockerfile: apps/order-query-api/Dockerfile
+    container_name: flashflow-order-query-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ORDER_QUERY_API_PORT: 3001
+      POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
+    ports:
+      - "3001:3001"
+
   outbox-publisher:
     profiles: ["phase1", "phase2"]
     build:
@@ -135,6 +150,44 @@ services:
       RETRY_TOPIC_5S: order.retry.5s
       RETRY_TOPIC_1M: order.retry.1m
       ORDER_DLQ_TOPIC: order.dlq
+
+  inventory-worker:
+    profiles: ["phase2"]
+    build:
+      context: .
+      dockerfile: apps/inventory-worker/Dockerfile
+    container_name: flashflow-inventory-worker
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BROKERS: kafka:29092
+      INVENTORY_CLIENT_ID: flashflow-inventory-worker
+      INVENTORY_CONSUMER_GROUP: inventory-workers
+      PAYMENT_EVENTS_TOPIC: payment.events
+      INVENTORY_EVENTS_TOPIC: inventory.events
+      INVENTORY_REJECT_USER_PREFIX: reject-inventory
+      INVENTORY_RESERVE_LIMIT: 800
+
+  order-status-updater:
+    profiles: ["phase2"]
+    build:
+      context: .
+      dockerfile: apps/order-status-updater/Dockerfile
+    container_name: flashflow-order-status-updater
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
+      KAFKA_BROKERS: kafka:29092
+      STATUS_UPDATER_CLIENT_ID: flashflow-order-status-updater
+      STATUS_UPDATER_CONSUMER_GROUP: order-status-updaters
+      PAYMENT_EVENTS_TOPIC: payment.events
+      INVENTORY_EVENTS_TOPIC: inventory.events
+      ORDER_STATUS_TOPIC: order.status
 
 volumes:
   kafka_data:

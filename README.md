@@ -8,7 +8,7 @@ Realtime Commerce Event Platform for Kafka practice.
 
 ## Phase 2 slice
 
-`Consume order.created -> publish payment.succeeded|payment.failed`
+`Order -> Payment -> Inventory -> Query status`
 
 ## Stack
 
@@ -65,6 +65,18 @@ make dev-outbox
 make dev-payment
 ```
 
+```bash
+make dev-inventory
+```
+
+```bash
+make dev-status-updater
+```
+
+```bash
+make dev-order-query-api
+```
+
 5. Test endpoint:
 
 ```bash
@@ -76,8 +88,11 @@ curl -X POST http://localhost:3000/orders \
 ## Project layout
 
 - `apps/order-api`: HTTP API, writes `orders` + `outbox_events` in one transaction
+- `apps/order-query-api`: reads `order_status_view` and serves current order status
 - `apps/outbox-publisher`: polls outbox and publishes to Kafka
 - `apps/payment-worker`: consumes `order.created`, publishes payment outcome events, and handles retry/DLQ routing
+- `apps/inventory-worker`: consumes `payment.succeeded`, publishes inventory outcome events
+- `apps/order-status-updater`: consumes order/payment/inventory events, updates `order_status_view`, publishes `order.status`
 - `packages/common`: shared event envelope/types
 - `db/migrations`: SQL migrations
 - `scripts`: helper scripts (`migrate`, `create-topics`)
@@ -105,7 +120,9 @@ make smoke-phase2
 
 This checks:
 - `payment-worker` consumes `order.created`
-- `payment.succeeded` and `payment.failed` events are published to `payment.events`
+- `inventory-worker` consumes `payment.succeeded`
+- `order-status-updater` updates `order_status_view`
+- `order-query-api` returns correct final statuses
 - retry path routes failing messages to `order.dlq`
 
 ## Requirement mapping (Phase 1)
@@ -114,4 +131,4 @@ This checks:
 
 ## Requirement mapping (Phase 2)
 
-- `FR-02`, `KR-03`, `KR-04`, `KR-07`, `DER-03`, `TR-01`, `TR-02`
+- `FR-02`, `FR-03`, `FR-05`, `KR-03`, `KR-04`, `KR-07`, `KR-08`, `DER-03`, `TR-01`, `TR-02`

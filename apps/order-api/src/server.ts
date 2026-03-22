@@ -59,6 +59,16 @@ app.post("/orders", async (req, res) => {
       [randomUUID(), event.eventId, orderId, event.eventType, JSON.stringify(event)],
     );
 
+    await client.query(
+      `INSERT INTO order_status_view (order_id, current_status, last_event_id, last_updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (order_id) DO UPDATE
+       SET current_status = EXCLUDED.current_status,
+           last_event_id = EXCLUDED.last_event_id,
+           last_updated_at = NOW()`,
+      [orderId, "PENDING_PAYMENT", event.eventId],
+    );
+
     await client.query("COMMIT");
 
     res.status(201).json({

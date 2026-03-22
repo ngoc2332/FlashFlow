@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up up-phase1 up-phase2 down logs migrate topics install dev-order-api dev-outbox dev-payment smoke-phase1 smoke-phase2
+.PHONY: up up-phase1 up-phase2 down logs migrate topics install dev-order-api dev-order-query-api dev-outbox dev-payment dev-inventory dev-status-updater smoke-phase1 smoke-phase2
 
 up:
 	docker compose up -d kafka schema-registry kafka-ui postgres redis
@@ -9,7 +9,7 @@ up-phase1:
 	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase1 up -d --build order-api outbox-publisher
 
 up-phase2:
-	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase2 up -d --build order-api outbox-publisher payment-worker
+	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase2 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater
 
 down:
 	docker compose down
@@ -29,11 +29,20 @@ install:
 dev-order-api:
 	npm run dev:order-api
 
+dev-order-query-api:
+	npm run dev:order-query-api
+
 dev-outbox:
 	npm run dev:outbox
 
 dev-payment:
 	npm run dev:payment
+
+dev-inventory:
+	npm run dev:inventory
+
+dev-status-updater:
+	npm run dev:status-updater
 
 smoke-phase1:
 	./scripts/smoke-phase1.sh

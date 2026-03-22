@@ -9,11 +9,17 @@
   "scripts": {
     "build": "npm run -ws build",
     "dev:order-api": "npm run dev -w @flashflow/order-api",
+    "dev:order-query-api": "npm run dev -w @flashflow/order-query-api",
     "dev:outbox": "npm run dev -w @flashflow/outbox-publisher",
     "dev:payment": "npm run dev -w @flashflow/payment-worker",
+    "dev:inventory": "npm run dev -w @flashflow/inventory-worker",
+    "dev:status-updater": "npm run dev -w @flashflow/order-status-updater",
     "start:order-api": "npm run start -w @flashflow/order-api",
+    "start:order-query-api": "npm run start -w @flashflow/order-query-api",
     "start:outbox": "npm run start -w @flashflow/outbox-publisher",
-    "start:payment": "npm run start -w @flashflow/payment-worker"
+    "start:payment": "npm run start -w @flashflow/payment-worker",
+    "start:inventory": "npm run start -w @flashflow/inventory-worker",
+    "start:status-updater": "npm run start -w @flashflow/order-status-updater"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
