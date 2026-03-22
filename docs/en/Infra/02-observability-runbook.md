@@ -1,40 +1,139 @@
 # Observability and Runbook
 
-## Metrics to expose
+## What is instrumented in Phase 5
 
-Application:
-- request count / duration
-- processed events count
-- processing failure count
-- retry count
-- DLQ publish count
+### Metrics
 
-Kafka:
-- consumer lag by group/topic/partition
-- messages in/out per topic
-- rebalance count
+Application and worker metrics are exposed in Prometheus format:
 
-## Logging standards
+- `flashflow_http_requests_total`
+- `flashflow_http_request_duration_seconds`
+- `flashflow_orders_created_total`
+- `flashflow_order_create_failures_total`
+- `flashflow_order_query_results_total`
+- `flashflow_outbox_published_events_total`
+- `flashflow_outbox_publish_failures_total`
+- `flashflow_outbox_unpublished_events`
+- `flashflow_worker_processed_events_total`
+- `flashflow_worker_processing_failures_total`
+- `flashflow_worker_retry_publishes_total`
+- `flashflow_worker_dlq_publishes_total`
+- `flashflow_worker_rebalances_total`
+- `flashflow_worker_processing_duration_seconds`
+- `flashflow_kafka_consumer_lag`
 
-- JSON logs
-- include `traceId`, `eventId`, `orderId`, `service`, `consumerGroup`
-- log business transition and error category
+### Logging standard
 
-## Tracing
+All services log JSON lines with shared keys:
 
-- OpenTelemetry instrumentation for APIs and worker pipelines
-- propagate `traceId` via Kafka headers
+- `timestamp`
+- `level`
+- `service`
+- `message`
+- `traceId` (when available)
+- `eventId` (when available)
+- `orderId` (when available)
+- `consumerGroup` (for workers)
 
-## Alert baseline
+### Tracing headers across Kafka
 
-- high consumer lag for > 5 minutes
-- DLQ rate spike over baseline
-- error rate > threshold for a service
+Produced Kafka messages now include:
 
-## Operational runbook
+- `traceId` and `x-trace-id`
+- `eventId` and `x-event-id`
+- `orderId` and `x-order-id`
+- `traceparent` (when traceId is UUID-compatible)
 
-1. Check Kafka UI for lag and stuck partitions.
-2. Check service logs for correlated `traceId` and failing event type.
-3. Verify retry topic consumption progress.
-4. If events in DLQ grow, inspect one sample payload and classify root cause.
-5. Apply fix and replay DLQ safely (replay tool/script with throttling).
+## Access points
+
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3002` (`admin/admin`)
+- Dashboard: `FlashFlow Phase 5 Overview`
+- Metrics endpoints:
+  - `http://localhost:3000/metrics`
+  - `http://localhost:3001/metrics`
+  - `http://localhost:9400/metrics`
+  - `http://localhost:9401/metrics`
+  - `http://localhost:9402/metrics`
+  - `http://localhost:9403/metrics`
+
+## Incident runbooks
+
+## 1. High consumer lag (> 5 minutes)
+
+1. Confirm lag in Grafana panel `Kafka Consumer Lag`.
+2. Identify service + topic pair with growth trend.
+3. Inspect worker logs by service:
+
+```bash
+docker compose logs --tail=200 payment-worker inventory-worker order-status-updater
+```
+
+4. Check if lag is tied to retries or DLQ:
+
+```bash
+curl -s http://localhost:9401/metrics | grep flashflow_worker_retry_publishes_total
+curl -s http://localhost:9401/metrics | grep flashflow_worker_dlq_publishes_total
+```
+
+5. If consumer is unhealthy, restart the affected worker only:
+
+```bash
+docker compose --profile phase5 restart payment-worker
+```
+
+6. Re-check lag slope; it should flatten and decrease.
+
+## 2. Poison message loop
+
+Symptoms:
+
+- repeated identical `errorType/errorMessage` in JSON logs
+- retry counters increase quickly
+- same `orderId` appears in retry topics
+
+Actions:
+
+1. Find a failing trace/order in logs.
+2. Verify payload sample from retry or DLQ topic:
+
+```bash
+docker compose exec -T kafka kafka-console-consumer \
+  --bootstrap-server kafka:29092 \
+  --topic order.dlq \
+  --from-beginning \
+  --timeout-ms 5000
+```
+
+3. Classify root cause:
+- contract error -> fix producer/schema/payload mapping
+- business rule rejection -> expected terminal flow
+- transient dependency timeout -> keep retry path, do not replay yet
+
+4. Deploy fix, then replay only impacted events.
+
+## 3. DLQ spike
+
+1. Validate spike in panel `DLQ Publish Rate (events/s)`.
+2. Break down by service using Prometheus query:
+
+```promql
+sum by (service) (rate(flashflow_worker_dlq_publishes_total[5m]))
+```
+
+3. For top offender service, inspect latest errors:
+
+```bash
+docker compose logs --tail=300 payment-worker | grep errorMessage
+```
+
+4. If issue is ongoing and harmful, reduce input pressure temporarily by pausing producer side.
+5. Fix, then replay DLQ with throttling.
+
+## Safe DLQ replay checklist
+
+1. Replay only after root cause is fixed.
+2. Replay in small batches (for example 50-100 records).
+3. Preserve original `traceId/eventId/orderId` headers when republishing.
+4. Monitor lag + error + DLQ panels during replay.
+5. Stop replay immediately if DLQ slope increases again.

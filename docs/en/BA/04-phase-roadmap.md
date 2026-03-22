@@ -3,10 +3,10 @@
 Goal: deliver quickly in a few days while keeping DDD + EDD + Kafka reliability standards.
 
 Status update (2026-03-22):
-1. Phase 3 done and smoke passed: `make smoke-phase3`.
-2. Completed reliability points: `processed_events` dedup, manual commit, retry/DLQ, graceful shutdown.
-3. Main changed scope in Phase 3: `apps/*worker*`, `apps/order-status-updater`, `packages/common`, `scripts/smoke-phase3.sh`, `docs/*`.
-4. Phase 4 is started: Schema Registry `BACKWARD`, envelope/versioning governance, compatibility tests (`v1 -> v2`).
+1. Phase 4 done and smoke passed: `make smoke-phase4`.
+2. Completed contract-governance points: Schema Registry `BACKWARD`, standardized envelope, and compatibility checks (`v1 -> v2`).
+3. Phase 5 implementation is started in current branch: app metrics, Kafka lag metrics, JSON logs, tracing headers, Prometheus/Grafana dashboard, and runbook updates.
+4. Main changed scope in Phase 5: `apps/*`, `packages/common`, `docker-compose.yml`, `ops/*`, `docs/*`.
 
 ## Phase 0: Setup and design alignment
 

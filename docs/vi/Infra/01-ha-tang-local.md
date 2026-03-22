@@ -18,14 +18,20 @@
 - Postgres: `5432`
 - Redis: `6379`
 - Prometheus: `9090`
-- Grafana: `3000`
+- Grafana: `3002`
 
 ## Lưu ý docker compose
 
 - Dùng named volumes cho Kafka và Postgres để giữ dữ liệu.
-- Đặt tất cả service trong một network riêng (`kafka-practice-net`).
+- Giữ `prometheus` và `grafana` trong profile `phase5`.
 - Thêm healthcheck và startup dependency.
 - Quản lý biến môi trường trong `.env` và cung cấp `.env.example`.
+
+## Cách khởi động Phase 5
+
+```bash
+make up-phase5
+```
 
 ## Biến môi trường tối thiểu
 

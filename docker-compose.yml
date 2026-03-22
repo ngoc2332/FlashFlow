@@ -82,8 +82,43 @@ services:
       timeout: 5s
       retries: 10
 
+  prometheus:
+    profiles: ["phase5"]
+    image: prom/prometheus:v2.53.4
+    container_name: flashflow-prometheus
+    depends_on:
+      - order-api
+      - order-query-api
+      - outbox-publisher
+      - payment-worker
+      - inventory-worker
+      - order-status-updater
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    profiles: ["phase5"]
+    image: grafana/grafana:11.1.4
+    container_name: flashflow-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3002:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./ops/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
   order-api:
-    profiles: ["phase1", "phase2", "phase3", "phase4"]
+    profiles: ["phase1", "phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/order-api/Dockerfile
@@ -95,12 +130,13 @@ services:
         condition: service_healthy
     environment:
       ORDER_API_PORT: 3000
+      ORDER_API_SERVICE_NAME: order-api
       POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
     ports:
       - "3000:3000"
 
   order-query-api:
-    profiles: ["phase2", "phase3", "phase4"]
+    profiles: ["phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/order-query-api/Dockerfile
@@ -110,12 +146,13 @@ services:
         condition: service_healthy
     environment:
       ORDER_QUERY_API_PORT: 3001
+      ORDER_QUERY_API_SERVICE_NAME: order-query-api
       POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
     ports:
       - "3001:3001"
 
   outbox-publisher:
-    profiles: ["phase1", "phase2", "phase3", "phase4"]
+    profiles: ["phase1", "phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/outbox-publisher/Dockerfile
@@ -131,9 +168,13 @@ services:
       OUTBOX_CLIENT_ID: flashflow-outbox-publisher
       OUTBOX_POLL_INTERVAL_MS: 1000
       OUTBOX_BATCH_SIZE: 50
+      OUTBOX_SERVICE_NAME: outbox-publisher
+      OUTBOX_METRICS_PORT: 9400
+    ports:
+      - "9400:9400"
 
   payment-worker:
-    profiles: ["phase2", "phase3", "phase4"]
+    profiles: ["phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/payment-worker/Dockerfile
@@ -146,17 +187,21 @@ services:
     environment:
       POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
       KAFKA_BROKERS: kafka:29092
+      PAYMENT_SERVICE_NAME: payment-worker
       PAYMENT_CLIENT_ID: flashflow-payment-worker
       PAYMENT_CONSUMER_GROUP: payment-workers
       PAYMENT_EVENTS_TOPIC: payment.events
       PAYMENT_APPROVAL_LIMIT: 1000
       PAYMENT_FAIL_USER_PREFIX: fail-payment
+      PAYMENT_METRICS_PORT: 9401
       RETRY_TOPIC_5S: order.retry.5s
       RETRY_TOPIC_1M: order.retry.1m
       ORDER_DLQ_TOPIC: order.dlq
+    ports:
+      - "9401:9401"
 
   inventory-worker:
-    profiles: ["phase2", "phase3", "phase4"]
+    profiles: ["phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/inventory-worker/Dockerfile
@@ -169,6 +214,7 @@ services:
     environment:
       POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
       KAFKA_BROKERS: kafka:29092
+      INVENTORY_SERVICE_NAME: inventory-worker
       INVENTORY_CLIENT_ID: flashflow-inventory-worker
       INVENTORY_CONSUMER_GROUP: inventory-workers
       PAYMENT_EVENTS_TOPIC: payment.events
@@ -176,12 +222,15 @@ services:
       INVENTORY_REJECT_USER_PREFIX: reject-inventory
       INVENTORY_FAIL_USER_PREFIX: fail-inventory
       INVENTORY_RESERVE_LIMIT: 800
+      INVENTORY_METRICS_PORT: 9402
       RETRY_TOPIC_5S: order.retry.5s
       RETRY_TOPIC_1M: order.retry.1m
       ORDER_DLQ_TOPIC: order.dlq
+    ports:
+      - "9402:9402"
 
   order-status-updater:
-    profiles: ["phase2", "phase3", "phase4"]
+    profiles: ["phase2", "phase3", "phase4", "phase5"]
     build:
       context: .
       dockerfile: apps/order-status-updater/Dockerfile
@@ -194,14 +243,18 @@ services:
     environment:
       POSTGRES_URL: postgres://flashflow:flashflow@postgres:5432/flashflow
       KAFKA_BROKERS: kafka:29092
+      STATUS_UPDATER_SERVICE_NAME: order-status-updater
       STATUS_UPDATER_CLIENT_ID: flashflow-order-status-updater
       STATUS_UPDATER_CONSUMER_GROUP: order-status-updaters
       PAYMENT_EVENTS_TOPIC: payment.events
       INVENTORY_EVENTS_TOPIC: inventory.events
       ORDER_STATUS_TOPIC: order.status
+      STATUS_UPDATER_METRICS_PORT: 9403
       RETRY_TOPIC_5S: order.retry.5s
       RETRY_TOPIC_1M: order.retry.1m
       ORDER_DLQ_TOPIC: order.dlq
+    ports:
+      - "9403:9403"
 
 volumes:
   kafka_data:

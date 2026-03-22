@@ -14,8 +14,9 @@ COPY packages/common/package.json packages/common/package.json
 RUN npm install
 
 COPY apps/order-query-api apps/order-query-api
+COPY packages/common packages/common
 
-RUN npm run build -w @flashflow/order-query-api
+RUN npm run build -w @flashflow/common && npm run build -w @flashflow/order-query-api
 
 EXPOSE 3001
 

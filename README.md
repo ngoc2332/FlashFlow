@@ -18,6 +18,10 @@ Realtime Commerce Event Platform for Kafka practice.
 
 `Schema Registry BACKWARD + envelope/versioning governance + v1 -> v2 compatibility`
 
+## Phase 5 slice
+
+`Metrics + JSON logs + tracing headers + Prometheus/Grafana dashboard + runbook`
+
 ## Stack
 
 - Node.js + TypeScript (workspaces)
@@ -68,6 +72,12 @@ Start phase4 services:
 
 ```bash
 make up-phase4
+```
+
+Start phase5 services and observability stack:
+
+```bash
+make up-phase5
 ```
 
 Alternative local mode (requires Node.js + npm):
@@ -172,6 +182,17 @@ This checks:
 - `order.created` schema `v2` is backward-compatible with `v1`
 - Current consumers still process a valid `order.created` `schemaVersion=2` event
 
+## Observability endpoints (Phase 5)
+
+- Order API metrics: `http://localhost:3000/metrics`
+- Order Query API metrics: `http://localhost:3001/metrics`
+- Outbox Publisher metrics: `http://localhost:9400/metrics`
+- Payment Worker metrics: `http://localhost:9401/metrics`
+- Inventory Worker metrics: `http://localhost:9402/metrics`
+- Status Updater metrics: `http://localhost:9403/metrics`
+- Prometheus: `http://localhost:9090`
+- Grafana: `http://localhost:3002` (default `admin/admin`)
+
 ## Requirement mapping (Phase 1)
 
 - `FR-01`, `KR-01`, `KR-02`, `KR-07`, `DER-01`, `DER-03`, `TR-01`
@@ -187,3 +208,7 @@ This checks:
 ## Requirement mapping (Phase 4)
 
 - `FR-06`, `KR-05`, `DER-05`, `TR-03`
+
+## Requirement mapping (Phase 5)
+
+- `FR-06`, `KR-06`, `KR-07`, `NFR-05`, `DER-06`, `TR-02`

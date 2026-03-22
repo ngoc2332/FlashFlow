@@ -1,0 +1,40 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  - job_name: flashflow-order-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - order-api:3000
+
+  - job_name: flashflow-order-query-api
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - order-query-api:3001
+
+  - job_name: flashflow-outbox-publisher
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - outbox-publisher:9400
+
+  - job_name: flashflow-payment-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - payment-worker:9401
+
+  - job_name: flashflow-inventory-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - inventory-worker:9402
+
+  - job_name: flashflow-order-status-updater
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - order-status-updater:9403

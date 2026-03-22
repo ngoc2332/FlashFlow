@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up up-phase1 up-phase2 up-phase3 up-phase4 down logs migrate topics install dev-order-api dev-order-query-api dev-outbox dev-payment dev-inventory dev-status-updater smoke-phase1 smoke-phase2 smoke-phase3 smoke-phase4 schema-phase4
+.PHONY: up up-phase1 up-phase2 up-phase3 up-phase4 up-phase5 down logs migrate topics install dev-order-api dev-order-query-api dev-outbox dev-payment dev-inventory dev-status-updater smoke-phase1 smoke-phase2 smoke-phase3 smoke-phase4 schema-phase4
 
 up:
 	docker compose up -d kafka schema-registry kafka-ui postgres redis
@@ -16,6 +16,9 @@ up-phase3:
 
 up-phase4:
 	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase4 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater
+
+up-phase5:
+	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase5 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater prometheus grafana
 
 down:
 	docker compose down

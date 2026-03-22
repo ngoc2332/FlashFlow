@@ -5,21 +5,28 @@ import {
   EventEnvelope,
   HeaderValue,
   INVENTORY_EVENTS_TOPIC,
+  MetricsRegistry,
   NonRetryableProcessingError,
   PAYMENT_EVENTS_TOPIC,
   PAYMENT_SUCCEEDED_EVENT,
   PaymentSucceededPayload,
   RetryPolicy,
   RetryableProcessingError,
+  buildKafkaHeaders,
+  closeMetricsServer,
   createDeterministicEventId,
   createInventoryRejectedEvent,
   createInventoryReservedEvent,
+  createJsonLogger,
   headerToString,
   nextOffset,
   normalizeHeaders,
   parseEventEnvelope,
   parseRetryCount,
   resolveRetryTarget,
+  resolveTraceIdFromKafkaHeaders,
+  startConsumerLagCollector,
+  startMetricsServer,
 } from "@flashflow/common";
 
 const postgresUrl =
@@ -36,6 +43,8 @@ const paymentEventsTopic = process.env.PAYMENT_EVENTS_TOPIC ?? PAYMENT_EVENTS_TO
 const inventoryEventsTopic = process.env.INVENTORY_EVENTS_TOPIC ?? INVENTORY_EVENTS_TOPIC;
 const rejectUserPrefix = process.env.INVENTORY_REJECT_USER_PREFIX ?? "reject-inventory";
 const failUserPrefix = process.env.INVENTORY_FAIL_USER_PREFIX ?? "fail-inventory";
+const rawMetricsPort = Number(process.env.INVENTORY_METRICS_PORT ?? 9402);
+const metricsPort = Number.isFinite(rawMetricsPort) && rawMetricsPort > 0 ? rawMetricsPort : 9402;
 
 const retryPolicy: RetryPolicy = {
   retryTopic5s: process.env.RETRY_TOPIC_5S ?? "order.retry.5s",
@@ -50,6 +59,80 @@ const kafka = new Kafka({ clientId, brokers });
 const pool = new Pool({ connectionString: postgresUrl });
 const consumer: Consumer = kafka.consumer({ groupId: consumerGroup });
 const producer: Producer = kafka.producer({ idempotent: true, maxInFlightRequests: 1 });
+const logger = createJsonLogger({
+  service: serviceName,
+  defaultFields: {
+    consumerGroup,
+  },
+});
+const metrics = new MetricsRegistry();
+
+const processedEventsCounter = metrics.counter(
+  "flashflow_worker_processed_events_total",
+  "Total processed worker events",
+  ["service", "consumer_group", "topic", "event_type"],
+);
+const duplicateEventsCounter = metrics.counter(
+  "flashflow_worker_duplicate_events_total",
+  "Total duplicate events skipped by worker",
+  ["service", "consumer_group", "topic"],
+);
+const processingFailuresCounter = metrics.counter(
+  "flashflow_worker_processing_failures_total",
+  "Total worker processing failures",
+  ["service", "consumer_group", "topic", "error_type"],
+);
+const retryEventsCounter = metrics.counter(
+  "flashflow_worker_retry_publishes_total",
+  "Total messages routed to retry topics",
+  ["service", "consumer_group", "topic", "target_topic"],
+);
+const dlqEventsCounter = metrics.counter(
+  "flashflow_worker_dlq_publishes_total",
+  "Total messages routed to DLQ",
+  ["service", "consumer_group", "topic"],
+);
+const producedEventsCounter = metrics.counter(
+  "flashflow_worker_published_events_total",
+  "Total worker output events published",
+  ["service", "consumer_group", "topic", "event_type"],
+);
+const offsetCommitsCounter = metrics.counter(
+  "flashflow_worker_offset_commits_total",
+  "Total committed offsets by worker",
+  ["service", "consumer_group", "topic"],
+);
+const rebalanceCounter = metrics.counter(
+  "flashflow_worker_rebalances_total",
+  "Total consumer rebalances",
+  ["service", "consumer_group"],
+);
+const inflightGauge = metrics.gauge(
+  "flashflow_worker_inflight_messages",
+  "Current in-flight messages",
+  ["service", "consumer_group"],
+);
+const processingDurationSeconds = metrics.histogram(
+  "flashflow_worker_processing_duration_seconds",
+  "Worker message processing duration in seconds",
+  ["service", "consumer_group", "topic", "result"],
+);
+
+const metricsServer = startMetricsServer({
+  port: metricsPort,
+  service: serviceName,
+  registry: metrics,
+  logger,
+});
+
+const lagCollector = startConsumerLagCollector({
+  kafka,
+  service: serviceName,
+  consumerGroup,
+  topics: [paymentEventsTopic, retryPolicy.retryTopic5s, retryPolicy.retryTopic1m],
+  registry: metrics,
+  logger,
+});
 
 let isShuttingDown = false;
 let inFlightMessages = 0;
@@ -155,6 +238,12 @@ async function commitOffset(payload: EachMessagePayload): Promise<void> {
       offset: nextOffset(payload.message.offset),
     },
   ]);
+
+  offsetCommitsCounter.inc({
+    service: serviceName,
+    consumer_group: consumerGroup,
+    topic: payload.topic,
+  });
 }
 
 async function hasProcessedEvent(eventId: string): Promise<boolean> {
@@ -211,20 +300,33 @@ async function publishOutcome(
       {
         key: event.orderId,
         value: JSON.stringify(inventoryEvent),
-        headers: {
-          eventId: inventoryEvent.eventId,
-          traceId: inventoryEvent.traceId,
+        headers: buildKafkaHeaders({
           source: serviceName,
-          schemaVersion: String(inventoryEvent.schemaVersion),
+          traceId: inventoryEvent.traceId,
+          eventId: inventoryEvent.eventId,
+          orderId: inventoryEvent.orderId,
+          schemaVersion: inventoryEvent.schemaVersion,
           eventKind: inventoryEvent.eventKind,
-        },
+          eventType: inventoryEvent.eventType,
+        }),
       },
     ],
   });
 
-  console.log(
-    `published ${inventoryEvent.eventType} for order ${inventoryEvent.orderId} to ${inventoryEventsTopic}`,
-  );
+  producedEventsCounter.inc({
+    service: serviceName,
+    consumer_group: consumerGroup,
+    topic: inventoryEventsTopic,
+    event_type: inventoryEvent.eventType,
+  });
+
+  logger.info("inventory outcome published", {
+    orderId: inventoryEvent.orderId,
+    eventId: inventoryEvent.eventId,
+    eventType: inventoryEvent.eventType,
+    traceId: inventoryEvent.traceId,
+    outputTopic: inventoryEventsTopic,
+  });
 }
 
 async function routeToRetryOrDlq(
@@ -237,6 +339,8 @@ async function routeToRetryOrDlq(
   const route = resolveRetryTarget(error, retryCount, retryPolicy);
   const normalizedHeaders = normalizeHeaders(headers);
   const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
+  const traceId =
+    resolveTraceIdFromKafkaHeaders(headers) ?? normalizedHeaders.traceId ?? normalizedHeaders["x-trace-id"];
 
   await producer.send({
     topic: route.topic,
@@ -246,6 +350,13 @@ async function routeToRetryOrDlq(
         value: messageValue,
         headers: {
           ...normalizedHeaders,
+          ...buildKafkaHeaders({
+            source: serviceName,
+            traceId,
+            eventId: normalizedHeaders.eventId,
+            orderId,
+            eventType: normalizedHeaders.eventType,
+          }),
           retryCount: String(route.nextRetryCount),
           sourceTopic: payload.topic,
           sourceService: serviceName,
@@ -258,9 +369,30 @@ async function routeToRetryOrDlq(
     ],
   });
 
-  console.error(
-    `routed order ${orderId} to ${route.topic} after error ${error.name}: ${error.message}`,
-  );
+  if (route.topic === retryPolicy.dlqTopic) {
+    dlqEventsCounter.inc({
+      service: serviceName,
+      consumer_group: consumerGroup,
+      topic: payload.topic,
+    });
+  } else {
+    retryEventsCounter.inc({
+      service: serviceName,
+      consumer_group: consumerGroup,
+      topic: payload.topic,
+      target_topic: route.topic,
+    });
+  }
+
+  logger.error("message routed to retry or dlq", {
+    traceId,
+    orderId,
+    sourceTopic: payload.topic,
+    targetTopic: route.topic,
+    terminal: route.terminal,
+    retryCount,
+    error,
+  });
 
   return {
     terminal: route.terminal,
@@ -271,9 +403,21 @@ async function routeToRetryOrDlq(
 async function handleMessage(payload: EachMessagePayload): Promise<void> {
   const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
   const targetWorker = headerToString(headers?.targetWorker);
+  const startedAt = process.hrtime.bigint();
+  let result = "success";
 
   if (payload.topic !== paymentEventsTopic && targetWorker !== serviceName) {
     await commitOffset(payload);
+    result = "skipped_target_worker";
+    processingDurationSeconds.observe(
+      {
+        service: serviceName,
+        consumer_group: consumerGroup,
+        topic: payload.topic,
+        result,
+      },
+      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+    );
     return;
   }
 
@@ -283,8 +427,19 @@ async function handleMessage(payload: EachMessagePayload): Promise<void> {
     envelope = parseEnvelope(payload.message.value);
 
     if (await hasProcessedEvent(envelope.eventId)) {
-      console.log(`skip duplicated inventory input eventId=${envelope.eventId}`);
+      duplicateEventsCounter.inc({
+        service: serviceName,
+        consumer_group: consumerGroup,
+        topic: payload.topic,
+      });
+      logger.info("duplicate event skipped", {
+        traceId: envelope.traceId,
+        orderId: envelope.orderId,
+        eventId: envelope.eventId,
+        topic: payload.topic,
+      });
       await commitOffset(payload);
+      result = "duplicate";
       return;
     }
 
@@ -292,6 +447,7 @@ async function handleMessage(payload: EachMessagePayload): Promise<void> {
 
     if (!paymentSucceededEvent) {
       await commitOffset(payload);
+      result = "ignored_event_type";
       return;
     }
 
@@ -300,9 +456,24 @@ async function handleMessage(payload: EachMessagePayload): Promise<void> {
     await publishOutcome(paymentSucceededEvent, decision);
     await markProcessedEvent(envelope.eventId);
     await commitOffset(payload);
+
+    processedEventsCounter.inc({
+      service: serviceName,
+      consumer_group: consumerGroup,
+      topic: payload.topic,
+      event_type: envelope.eventType,
+    });
+    result = "processed";
   } catch (rawError) {
     const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
     const orderId = envelope?.orderId ?? readOrderIdFromKey(payload.message);
+
+    processingFailuresCounter.inc({
+      service: serviceName,
+      consumer_group: consumerGroup,
+      topic: payload.topic,
+      error_type: error.name,
+    });
 
     const route = await routeToRetryOrDlq(payload, orderId, error);
 
@@ -311,6 +482,17 @@ async function handleMessage(payload: EachMessagePayload): Promise<void> {
     }
 
     await commitOffset(payload);
+    result = route.terminal ? "routed_dlq" : "routed_retry";
+  } finally {
+    processingDurationSeconds.observe(
+      {
+        service: serviceName,
+        consumer_group: consumerGroup,
+        topic: payload.topic,
+        result,
+      },
+      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
+    );
   }
 }
 
@@ -323,16 +505,25 @@ async function start(): Promise<void> {
   await consumer.subscribe({ topic: retryPolicy.retryTopic1m, fromBeginning: true });
 
   consumer.on(consumer.events.REBALANCING, () => {
-    console.warn(`${serviceName} rebalancing started`);
+    rebalanceCounter.inc({
+      service: serviceName,
+      consumer_group: consumerGroup,
+    });
+    logger.warn("consumer rebalancing started");
   });
 
   consumer.on(consumer.events.GROUP_JOIN, () => {
-    console.log(`${serviceName} group join completed`);
+    logger.info("consumer group join completed", {
+      inputTopics: [paymentEventsTopic, retryPolicy.retryTopic5s, retryPolicy.retryTopic1m].join(","),
+      outputTopic: inventoryEventsTopic,
+    });
   });
 
-  console.log(
-    `${serviceName} started: group=${consumerGroup}, inputTopics=${paymentEventsTopic},${retryPolicy.retryTopic5s},${retryPolicy.retryTopic1m}, outputTopic=${inventoryEventsTopic}`,
-  );
+  logger.info("service started", {
+    brokers,
+    metricsPort,
+    reserveLimit,
+  });
 
   runPromise = consumer.run({
     autoCommit: false,
@@ -342,13 +533,27 @@ async function start(): Promise<void> {
       }
 
       inFlightMessages += 1;
+      inflightGauge.set(
+        {
+          service: serviceName,
+          consumer_group: consumerGroup,
+        },
+        inFlightMessages,
+      );
 
       try {
         await handleMessage(payload);
       } catch (error) {
-        console.error("inventory-worker failed to handle message", error);
+        logger.error("inventory-worker failed to handle message", { error });
       } finally {
         inFlightMessages -= 1;
+        inflightGauge.set(
+          {
+            service: serviceName,
+            consumer_group: consumerGroup,
+          },
+          inFlightMessages,
+        );
       }
     },
   });
@@ -377,7 +582,7 @@ async function shutdown(exitCode = 0): Promise<void> {
     try {
       await consumer.stop();
     } catch (error) {
-      console.error("inventory-worker consumer stop failed", error);
+      logger.error("consumer stop failed", { error });
     }
 
     await waitForInflightDrain(30_000);
@@ -386,26 +591,38 @@ async function shutdown(exitCode = 0): Promise<void> {
       try {
         await runPromise;
       } catch (error) {
-        console.error("inventory-worker run loop exited with error", error);
+        logger.error("run loop exited with error", { error });
       }
     }
 
     try {
       await consumer.disconnect();
     } catch (error) {
-      console.error("inventory-worker consumer disconnect failed", error);
+      logger.error("consumer disconnect failed", { error });
     }
 
     try {
       await producer.disconnect();
     } catch (error) {
-      console.error("inventory-worker producer disconnect failed", error);
+      logger.error("producer disconnect failed", { error });
+    }
+
+    try {
+      await lagCollector.stop();
+    } catch (error) {
+      logger.warn("lag collector stop failed", { error });
+    }
+
+    try {
+      await closeMetricsServer(metricsServer);
+    } catch (error) {
+      logger.warn("metrics server close failed", { error });
     }
 
     try {
       await pool.end();
     } catch (error) {
-      console.error("inventory-worker postgres disconnect failed", error);
+      logger.error("postgres disconnect failed", { error });
     }
 
     process.exit(exitCode);
@@ -423,6 +640,6 @@ process.on("SIGTERM", () => {
 });
 
 void start().catch((error) => {
-  console.error("inventory-worker failed to start", error);
+  logger.error("service failed to start", { error });
   void shutdown(1);
 });
