@@ -2,6 +2,12 @@
 
 Goal: deliver quickly in a few days while keeping DDD + EDD + Kafka reliability standards.
 
+Status update (2026-03-22):
+1. Phase 3 done and smoke passed: `make smoke-phase3`.
+2. Completed reliability points: `processed_events` dedup, manual commit, retry/DLQ, graceful shutdown.
+3. Main changed scope in Phase 3: `apps/*worker*`, `apps/order-status-updater`, `packages/common`, `scripts/smoke-phase3.sh`, `docs/*`.
+4. Phase 4 is started: Schema Registry `BACKWARD`, envelope/versioning governance, compatibility tests (`v1 -> v2`).
+
 ## Phase 0: Setup and design alignment
 
 1. Finalize scope and requirement IDs in `BA/02-requirements.md`.

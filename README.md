@@ -14,6 +14,10 @@ Realtime Commerce Event Platform for Kafka practice.
 
 `Reliability hardening: dedup + manual commit + retry/DLQ + graceful shutdown`
 
+## Phase 4 slice
+
+`Schema Registry BACKWARD + envelope/versioning governance + v1 -> v2 compatibility`
+
 ## Stack
 
 - Node.js + TypeScript (workspaces)
@@ -58,6 +62,12 @@ Start phase3 services:
 
 ```bash
 make up-phase3
+```
+
+Start phase4 services:
+
+```bash
+make up-phase4
 ```
 
 Alternative local mode (requires Node.js + npm):
@@ -149,6 +159,19 @@ This checks:
 - retry/DLQ flow is standardized across workers
 - worker restart still converges to correct order status
 
+## Smoke test (Phase 4 start criteria)
+
+Run schema governance and compatibility smoke:
+
+```bash
+make smoke-phase4
+```
+
+This checks:
+- Schema Registry enforces `BACKWARD` compatibility
+- `order.created` schema `v2` is backward-compatible with `v1`
+- Current consumers still process a valid `order.created` `schemaVersion=2` event
+
 ## Requirement mapping (Phase 1)
 
 - `FR-01`, `KR-01`, `KR-02`, `KR-07`, `DER-01`, `DER-03`, `TR-01`
@@ -160,3 +183,7 @@ This checks:
 ## Requirement mapping (Phase 3)
 
 - `FR-02`, `FR-03`, `FR-05`, `KR-03`, `KR-04`, `KR-06`, `KR-07`, `DER-03`, `DER-06`, `TR-01`, `TR-02`
+
+## Requirement mapping (Phase 4)
+
+- `FR-06`, `KR-05`, `DER-05`, `TR-03`

@@ -17,6 +17,7 @@ import {
   headerToString,
   nextOffset,
   normalizeHeaders,
+  parseEventEnvelope,
   parseRetryCount,
   resolveRetryTarget,
 } from "@flashflow/common";
@@ -55,10 +56,6 @@ let inFlightMessages = 0;
 let runPromise: Promise<void> | undefined;
 let shutdownPromise: Promise<void> | undefined;
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-}
-
 function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
   if (Buffer.isBuffer(message.key)) {
     return message.key.toString("utf8");
@@ -72,53 +69,7 @@ function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
 }
 
 function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
-  if (!rawValue) {
-    throw new NonRetryableProcessingError("Message value is empty");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawValue.toString("utf8"));
-  } catch (error) {
-    throw new NonRetryableProcessingError(
-      `Message is not valid JSON: ${(error as Error).message}`,
-    );
-  }
-
-  if (!parsed || typeof parsed !== "object") {
-    throw new NonRetryableProcessingError("Event envelope must be an object");
-  }
-
-  const event = parsed as Partial<EventEnvelope<unknown>>;
-
-  if (typeof event.eventId !== "string" || !isUuid(event.eventId)) {
-    throw new NonRetryableProcessingError("eventId must be a valid UUID");
-  }
-
-  if (typeof event.orderId !== "string" || !isUuid(event.orderId)) {
-    throw new NonRetryableProcessingError("orderId must be a valid UUID");
-  }
-
-  if (typeof event.eventType !== "string" || event.eventType.trim().length === 0) {
-    throw new NonRetryableProcessingError("eventType is required");
-  }
-
-  return {
-    eventId: event.eventId,
-    eventKind: event.eventKind === "domain" ? "domain" : "integration",
-    eventType: event.eventType,
-    orderId: event.orderId,
-    occurredAt:
-      typeof event.occurredAt === "string" && event.occurredAt.trim().length > 0
-        ? event.occurredAt
-        : new Date().toISOString(),
-    traceId:
-      typeof event.traceId === "string" && event.traceId.trim().length > 0
-        ? event.traceId
-        : randomUUID(),
-    schemaVersion: typeof event.schemaVersion === "number" ? event.schemaVersion : 1,
-    payload: event.payload,
-  };
+  return parseEventEnvelope(rawValue);
 }
 
 function parsePaymentSucceededEvent(

@@ -1,5 +1,6 @@
 import { Kafka, Producer } from "kafkajs";
 import { Pool, PoolClient } from "pg";
+import { EventEnvelope } from "@flashflow/common";
 
 interface OutboxRow {
   id: string;
@@ -32,6 +33,14 @@ function resolveTopic(eventType: string): string {
   return eventType;
 }
 
+function readEnvelope(value: unknown): Partial<EventEnvelope<unknown>> {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return value as Partial<EventEnvelope<unknown>>;
+}
+
 async function fetchBatch(client: PoolClient): Promise<OutboxRow[]> {
   const result = await client.query<OutboxRow>(
     `SELECT id, event_id, aggregate_id, event_type, payload
@@ -60,6 +69,7 @@ async function publishOnce(): Promise<number> {
 
     for (const row of rows) {
       const topic = resolveTopic(row.event_type);
+      const envelope = readEnvelope(row.payload);
 
       await producer.send({
         topic,
@@ -69,7 +79,20 @@ async function publishOnce(): Promise<number> {
             value: JSON.stringify(row.payload),
             headers: {
               eventId: row.event_id,
+              traceId:
+                typeof envelope.traceId === "string" && envelope.traceId.trim().length > 0
+                  ? envelope.traceId
+                  : row.event_id,
               source: "outbox-publisher",
+              schemaVersion:
+                typeof envelope.schemaVersion === "number"
+                  ? String(envelope.schemaVersion)
+                  : "1",
+              eventKind: envelope.eventKind === "domain" ? "domain" : "integration",
+              eventType:
+                typeof envelope.eventType === "string" && envelope.eventType.trim().length > 0
+                  ? envelope.eventType
+                  : row.event_type,
             },
           },
         ],

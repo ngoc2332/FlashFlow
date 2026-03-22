@@ -61,3 +61,10 @@
   - `occurredAt`
   - `traceId`
   - `payload`
+- Versioning rules:
+  - `schemaVersion=1` is baseline; consumers must accept `>=1`.
+  - `v2+` changes must be additive only (new optional/defaulted fields).
+  - Do not remove/rename required fields in-place; use new event type for breaking changes.
+- Governance scripts:
+  - `make schema-phase4` sets Schema Registry compatibility to `BACKWARD` and validates `order.created` schema evolution.
+  - `make smoke-phase4` runs end-to-end `v1 -> v2` compatibility smoke.

@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
 import { Pool } from "pg";
 import {
@@ -16,6 +15,7 @@ import {
   headerToString,
   nextOffset,
   normalizeHeaders,
+  parseEventEnvelope,
   parseRetryCount,
   resolveRetryTarget,
 } from "@flashflow/common";
@@ -55,10 +55,6 @@ let inFlightMessages = 0;
 let runPromise: Promise<void> | undefined;
 let shutdownPromise: Promise<void> | undefined;
 
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
-}
-
 function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
   if (Buffer.isBuffer(message.key)) {
     return message.key.toString("utf8");
@@ -72,74 +68,33 @@ function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
 }
 
 function parseOrderCreatedEvent(rawValue: Buffer | null): EventEnvelope<OrderCreatedPayload> {
-  if (!rawValue) {
-    throw new NonRetryableProcessingError("Message value is empty");
-  }
+  return parseEventEnvelope<OrderCreatedPayload>(rawValue, {
+    expectedEventType: ORDER_CREATED_EVENT,
+    parsePayload: (rawPayload) => {
+      if (!rawPayload || typeof rawPayload !== "object") {
+        throw new NonRetryableProcessingError("payload is required");
+      }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawValue.toString("utf8"));
-  } catch (error) {
-    throw new NonRetryableProcessingError(
-      `Message is not valid JSON: ${(error as Error).message}`,
-    );
-  }
+      const payload = rawPayload as Partial<OrderCreatedPayload>;
 
-  if (!parsed || typeof parsed !== "object") {
-    throw new NonRetryableProcessingError("Event envelope must be an object");
-  }
+      if (typeof payload.userId !== "string" || payload.userId.trim().length === 0) {
+        throw new NonRetryableProcessingError("payload.userId is required");
+      }
 
-  const event = parsed as Partial<EventEnvelope<OrderCreatedPayload>>;
+      if (
+        typeof payload.totalAmount !== "number" ||
+        !Number.isFinite(payload.totalAmount) ||
+        payload.totalAmount <= 0
+      ) {
+        throw new NonRetryableProcessingError("payload.totalAmount must be a number > 0");
+      }
 
-  if (event.eventType !== ORDER_CREATED_EVENT) {
-    throw new NonRetryableProcessingError(`Unsupported eventType: ${String(event.eventType)}`);
-  }
-
-  if (typeof event.eventId !== "string" || !isUuid(event.eventId)) {
-    throw new NonRetryableProcessingError("eventId must be a valid UUID");
-  }
-
-  if (typeof event.orderId !== "string" || !isUuid(event.orderId)) {
-    throw new NonRetryableProcessingError("orderId must be a valid UUID");
-  }
-
-  if (!event.payload || typeof event.payload !== "object") {
-    throw new NonRetryableProcessingError("payload is required");
-  }
-
-  const payload = event.payload as Partial<OrderCreatedPayload>;
-
-  if (typeof payload.userId !== "string" || payload.userId.trim().length === 0) {
-    throw new NonRetryableProcessingError("payload.userId is required");
-  }
-
-  if (
-    typeof payload.totalAmount !== "number" ||
-    !Number.isFinite(payload.totalAmount) ||
-    payload.totalAmount <= 0
-  ) {
-    throw new NonRetryableProcessingError("payload.totalAmount must be a number > 0");
-  }
-
-  const traceId =
-    typeof event.traceId === "string" && event.traceId.trim().length > 0 ? event.traceId : randomUUID();
-
-  return {
-    eventId: event.eventId,
-    eventKind: event.eventKind === "domain" ? "domain" : "integration",
-    eventType: ORDER_CREATED_EVENT,
-    orderId: event.orderId,
-    occurredAt:
-      typeof event.occurredAt === "string" && event.occurredAt.trim().length > 0
-        ? event.occurredAt
-        : new Date().toISOString(),
-    traceId,
-    schemaVersion: typeof event.schemaVersion === "number" ? event.schemaVersion : 1,
-    payload: {
-      userId: payload.userId,
-      totalAmount: payload.totalAmount,
+      return {
+        userId: payload.userId,
+        totalAmount: payload.totalAmount,
+      };
     },
-  };
+  });
 }
 
 type PaymentDecision =

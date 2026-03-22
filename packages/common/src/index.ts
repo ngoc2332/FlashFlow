@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { NonRetryableProcessingError } from "./reliability";
 
 export type EventKind = "domain" | "integration";
+export const DEFAULT_SCHEMA_VERSION = 1;
 
 export interface EventEnvelope<T> {
   eventId: string;
@@ -51,6 +53,7 @@ export interface CreateOrderCreatedEventInput {
   userId: string;
   totalAmount: number;
   traceId?: string;
+  schemaVersion?: number;
 }
 
 export interface CreatePaymentSucceededEventInput {
@@ -59,6 +62,7 @@ export interface CreatePaymentSucceededEventInput {
   userId: string;
   totalAmount: number;
   traceId?: string;
+  schemaVersion?: number;
   paymentId?: string;
   provider?: string;
 }
@@ -71,6 +75,7 @@ export interface CreatePaymentFailedEventInput {
   reason: string;
   retryable: boolean;
   traceId?: string;
+  schemaVersion?: number;
 }
 
 export interface CreateInventoryReservedEventInput {
@@ -79,6 +84,7 @@ export interface CreateInventoryReservedEventInput {
   userId: string;
   totalAmount: number;
   traceId?: string;
+  schemaVersion?: number;
   reservationId?: string;
   warehouse?: string;
 }
@@ -90,6 +96,7 @@ export interface CreateInventoryRejectedEventInput {
   totalAmount: number;
   reason: string;
   traceId?: string;
+  schemaVersion?: number;
 }
 
 export const ORDER_CREATED_EVENT = "order.created";
@@ -100,11 +107,110 @@ export const INVENTORY_RESERVED_EVENT = "inventory.reserved";
 export const INVENTORY_REJECTED_EVENT = "inventory.rejected";
 export const INVENTORY_EVENTS_TOPIC = "inventory.events";
 
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function parseRequiredUuid(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || !uuidPattern.test(value)) {
+    throw new NonRetryableProcessingError(`${fieldName} must be a valid UUID`);
+  }
+
+  return value;
+}
+
+function parseRequiredString(value: unknown, fieldName: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw new NonRetryableProcessingError(`${fieldName} is required`);
+  }
+
+  return value;
+}
+
+export function parseSchemaVersion(value: unknown): number {
+  if (value === undefined) {
+    return DEFAULT_SCHEMA_VERSION;
+  }
+
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+    throw new NonRetryableProcessingError("schemaVersion must be a positive integer");
+  }
+
+  return value;
+}
+
+export interface ParseEventEnvelopeOptions<TPayload> {
+  expectedEventType?: string;
+  parsePayload?: (
+    payload: unknown,
+    envelope: Omit<EventEnvelope<unknown>, "payload">,
+  ) => TPayload;
+}
+
+export function parseEventEnvelope<TPayload = unknown>(
+  rawValue: Buffer | null,
+  options: ParseEventEnvelopeOptions<TPayload> = {},
+): EventEnvelope<TPayload> {
+  if (!rawValue) {
+    throw new NonRetryableProcessingError("Message value is empty");
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawValue.toString("utf8"));
+  } catch (error) {
+    throw new NonRetryableProcessingError(
+      `Message is not valid JSON: ${(error as Error).message}`,
+    );
+  }
+
+  if (!isRecord(parsed)) {
+    throw new NonRetryableProcessingError("Event envelope must be an object");
+  }
+
+  const eventType = parseRequiredString(parsed.eventType, "eventType");
+  if (options.expectedEventType && eventType !== options.expectedEventType) {
+    throw new NonRetryableProcessingError(
+      `Unsupported eventType: ${String(parsed.eventType)}`,
+    );
+  }
+
+  if (!isRecord(parsed.payload)) {
+    throw new NonRetryableProcessingError("payload is required");
+  }
+
+  const eventWithoutPayload: Omit<EventEnvelope<unknown>, "payload"> = {
+    eventId: parseRequiredUuid(parsed.eventId, "eventId"),
+    eventKind: parsed.eventKind === "domain" ? "domain" : "integration",
+    eventType,
+    orderId: parseRequiredUuid(parsed.orderId, "orderId"),
+    occurredAt:
+      typeof parsed.occurredAt === "string" && parsed.occurredAt.trim().length > 0
+        ? parsed.occurredAt
+        : new Date().toISOString(),
+    traceId:
+      typeof parsed.traceId === "string" && parsed.traceId.trim().length > 0
+        ? parsed.traceId
+        : randomUUID(),
+    schemaVersion: parseSchemaVersion(parsed.schemaVersion),
+  };
+
+  return {
+    ...eventWithoutPayload,
+    payload: options.parsePayload
+      ? options.parsePayload(parsed.payload, eventWithoutPayload)
+      : (parsed.payload as TPayload),
+  };
+}
+
 function createIntegrationEvent<T>(input: {
   eventId?: string;
   eventType: string;
   orderId: string;
   traceId?: string;
+  schemaVersion?: number;
   payload: T;
 }): EventEnvelope<T> {
   return {
@@ -114,7 +220,7 @@ function createIntegrationEvent<T>(input: {
     orderId: input.orderId,
     occurredAt: new Date().toISOString(),
     traceId: input.traceId ?? randomUUID(),
-    schemaVersion: 1,
+    schemaVersion: parseSchemaVersion(input.schemaVersion),
     payload: input.payload,
   };
 }
@@ -127,6 +233,7 @@ export function createOrderCreatedEvent(
     eventType: ORDER_CREATED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
+    schemaVersion: input.schemaVersion,
     payload: {
       userId: input.userId,
       totalAmount: input.totalAmount,
@@ -142,6 +249,7 @@ export function createPaymentSucceededEvent(
     eventType: PAYMENT_SUCCEEDED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
+    schemaVersion: input.schemaVersion,
     payload: {
       userId: input.userId,
       totalAmount: input.totalAmount,
@@ -159,6 +267,7 @@ export function createPaymentFailedEvent(
     eventType: PAYMENT_FAILED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
+    schemaVersion: input.schemaVersion,
     payload: {
       userId: input.userId,
       totalAmount: input.totalAmount,
@@ -176,6 +285,7 @@ export function createInventoryReservedEvent(
     eventType: INVENTORY_RESERVED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
+    schemaVersion: input.schemaVersion,
     payload: {
       userId: input.userId,
       totalAmount: input.totalAmount,
@@ -193,6 +303,7 @@ export function createInventoryRejectedEvent(
     eventType: INVENTORY_REJECTED_EVENT,
     orderId: input.orderId,
     traceId: input.traceId,
+    schemaVersion: input.schemaVersion,
     payload: {
       userId: input.userId,
       totalAmount: input.totalAmount,

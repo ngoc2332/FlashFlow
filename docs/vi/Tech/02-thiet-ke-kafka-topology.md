@@ -61,3 +61,10 @@
   - `occurredAt`
   - `traceId`
   - `payload`
+- Quy tắc versioning:
+  - `schemaVersion=1` là baseline; consumer phải đọc được version `>=1`.
+  - Thay đổi từ `v2+` chỉ theo hướng additive (thêm field optional/default).
+  - Không đổi tên/xóa required field tại chỗ; breaking change phải dùng event type mới.
+- Script governance:
+  - `make schema-phase4` set Schema Registry về `BACKWARD` và validate evolution cho schema `order.created`.
+  - `make smoke-phase4` chạy smoke end-to-end cho tương thích `v1 -> v2`.

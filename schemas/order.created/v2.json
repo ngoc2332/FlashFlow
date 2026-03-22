@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrderCreatedEnvelopeV2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "eventId",
+    "eventKind",
+    "eventType",
+    "orderId",
+    "occurredAt",
+    "traceId",
+    "schemaVersion",
+    "payload"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "eventKind": {
+      "type": "string",
+      "enum": ["domain", "integration"]
+    },
+    "eventType": {
+      "type": "string",
+      "const": "order.created"
+    },
+    "orderId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "occurredAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "traceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["userId", "totalAmount"],
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "totalAmount": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "currency": {
+          "type": "string",
+          "default": "USD",
+          "minLength": 3,
+          "maxLength": 3
+        }
+      }
+    }
+  }
+}

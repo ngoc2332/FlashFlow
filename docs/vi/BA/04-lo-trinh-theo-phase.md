@@ -2,6 +2,12 @@
 
 Mục tiêu: triển khai nhanh trong vài ngày nhưng vẫn giữ chuẩn DDD + EDD + Kafka reliability.
 
+Cập nhật trạng thái (2026-03-22):
+1. Phase 3 đã xong và smoke pass: `make smoke-phase3`.
+2. Các điểm reliability đã chốt: dedup `processed_events`, manual commit, retry/DLQ, graceful shutdown.
+3. Phạm vi file chính của Phase 3: `apps/*worker*`, `apps/order-status-updater`, `packages/common`, `scripts/smoke-phase3.sh`, `docs/*`.
+4. Đã bắt đầu Phase 4: Schema Registry `BACKWARD`, chuẩn hóa envelope/versioning, test tương thích `v1 -> v2`.
+
 ## Phase 0: Khởi tạo và chốt thiết kế
 
 1. Chốt scope và requirement IDs trong `BA/02-yeu-cau.md`.
