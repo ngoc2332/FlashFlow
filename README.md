@@ -137,6 +137,19 @@ curl -X POST http://localhost:3000/orders \
 - `db/migrations`: SQL migrations
 - `scripts`: helper scripts (`migrate`, `create-topics`)
 
+## DDD code layering baseline
+
+Runtime services follow this tactical structure:
+
+- `domain/`: business rules and invariant-aware parsing
+- `application/`: use-case orchestration and transaction boundaries
+- `infrastructure/`: DB/Kafka adapters and persistence operations
+- entrypoint (`server.ts`, `worker.ts`, `publisher.ts`, `updater.ts`): transport/process wiring
+
+See:
+- `docs/en/Tech/06-ddd-reference-architecture.md`
+- `docs/vi/Tech/06-kien-truc-tham-chieu-ddd.md`
+
 ## Smoke test (Phase 1 done criteria)
 
 Run everything end-to-end with one command:

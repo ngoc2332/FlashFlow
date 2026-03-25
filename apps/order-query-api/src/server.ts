@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import express from "express";
 import { Pool } from "pg";
 import { MetricsRegistry, createJsonLogger, toHttpTraceId } from "@flashflow/common";
+import { queryOrderStatusUseCase } from "./application/query-order-status.use-case";
+import { parseOrderId } from "./domain/order-id";
 
 const app = express();
 
@@ -29,9 +31,6 @@ const queryStatusResultCounter = metrics.counter(
   "Total order query result by type",
   ["service", "result"],
 );
-
-const uuidRegex =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function resolveTraceId(headers: Record<string, unknown>): string {
   const rawTraceId = headers["x-trace-id"];
@@ -84,69 +83,30 @@ app.get("/metrics", (_req, res) => {
 });
 
 app.get("/orders/:orderId/status", async (req, res) => {
-  const orderId = typeof req.params.orderId === "string" ? req.params.orderId.trim() : "";
+  const orderId = parseOrderId(req.params.orderId);
   const traceId = typeof res.locals.traceId === "string" ? res.locals.traceId : randomUUID();
 
-  if (!uuidRegex.test(orderId)) {
+  if (!orderId) {
     queryStatusResultCounter.inc({ service: serviceName, result: "invalid_order_id" });
     logger.warn("query status rejected invalid orderId", {
       traceId,
-      orderId,
+      orderId: req.params.orderId,
     });
     res.status(400).json({ message: "Invalid orderId format" });
     return;
   }
 
   try {
-    const statusView = await pool.query<{
-      order_id: string;
-      current_status: string;
-      last_event_id: string;
-      last_updated_at: Date;
-    }>(
-      `SELECT order_id, current_status, last_event_id, last_updated_at
-       FROM order_status_view
-       WHERE order_id = $1::uuid`,
-      [orderId],
-    );
+    const queryResult = await queryOrderStatusUseCase(pool, orderId);
 
-    if (statusView.rowCount && statusView.rows[0]) {
-      const row = statusView.rows[0];
-      queryStatusResultCounter.inc({ service: serviceName, result: "found_view" });
-      res.status(200).json({
-        orderId: row.order_id,
-        status: row.current_status,
-        lastEventId: row.last_event_id,
-        lastUpdatedAt: row.last_updated_at.toISOString(),
-      });
+    if (queryResult.result === "not_found") {
+      queryStatusResultCounter.inc({ service: serviceName, result: "not_found" });
+      res.status(404).json({ message: "Order not found" });
       return;
     }
 
-    const orderRow = await pool.query<{
-      order_id: string;
-      status: string;
-      updated_at: Date;
-    }>(
-      `SELECT order_id, status, updated_at
-       FROM orders
-       WHERE order_id = $1::uuid`,
-      [orderId],
-    );
-
-    if (orderRow.rowCount && orderRow.rows[0]) {
-      const row = orderRow.rows[0];
-      queryStatusResultCounter.inc({ service: serviceName, result: "found_orders" });
-      res.status(200).json({
-        orderId: row.order_id,
-        status: row.status,
-        lastEventId: null,
-        lastUpdatedAt: row.updated_at.toISOString(),
-      });
-      return;
-    }
-
-    queryStatusResultCounter.inc({ service: serviceName, result: "not_found" });
-    res.status(404).json({ message: "Order not found" });
+    queryStatusResultCounter.inc({ service: serviceName, result: queryResult.result });
+    res.status(200).json(queryResult.payload);
   } catch (error) {
     queryStatusResultCounter.inc({ service: serviceName, result: "db_error" });
     logger.error("query status failed", {

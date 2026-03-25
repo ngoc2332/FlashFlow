@@ -1,21 +1,13 @@
 import { Kafka, Producer } from "kafkajs";
-import { Pool, PoolClient } from "pg";
+import { Pool } from "pg";
 import {
-  EventEnvelope,
   MetricsRegistry,
-  buildKafkaHeaders,
   closeMetricsServer,
   createJsonLogger,
   startMetricsServer,
 } from "@flashflow/common";
-
-interface OutboxRow {
-  id: string;
-  event_id: string;
-  aggregate_id: string;
-  event_type: string;
-  payload: unknown;
-}
+import { publishOutboxBatchUseCase } from "./application/publish-outbox-batch.use-case";
+import { countUnpublishedOutboxEvents } from "./infrastructure/outbox-repository";
 
 const postgresUrl =
   process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
@@ -73,113 +65,34 @@ const metricsServer = startMetricsServer({
   logger,
 });
 
-function resolveTopic(eventType: string): string {
-  return eventType;
-}
-
-function readEnvelope(value: unknown): Partial<EventEnvelope<unknown>> {
-  if (!value || typeof value !== "object") {
-    return {};
-  }
-
-  return value as Partial<EventEnvelope<unknown>>;
-}
-
-async function fetchBatch(client: PoolClient): Promise<OutboxRow[]> {
-  const result = await client.query<OutboxRow>(
-    `SELECT id, event_id, aggregate_id, event_type, payload
-     FROM outbox_events
-     WHERE published_at IS NULL
-     ORDER BY created_at
-     LIMIT $1
-     FOR UPDATE SKIP LOCKED`,
-    [batchSize],
-  );
-
-  return result.rows;
-}
-
 async function updateOutboxBacklog(): Promise<void> {
-  const result = await pool.query<{ count: string }>(
-    `SELECT COUNT(*)::text AS count
-     FROM outbox_events
-     WHERE published_at IS NULL`,
-  );
-
-  const count = Number(result.rows[0]?.count ?? 0);
-  outboxBacklogGauge.set({ service: serviceName }, Number.isFinite(count) ? count : 0);
+  const client = await pool.connect();
+  try {
+    const count = await countUnpublishedOutboxEvents(client);
+    outboxBacklogGauge.set({ service: serviceName }, count);
+  } finally {
+    client.release();
+  }
 }
 
 async function publishOnce(): Promise<number> {
-  const client = await pool.connect();
   const startedAt = process.hrtime.bigint();
   pollRunsCounter.inc({ service: serviceName });
 
   try {
-    await client.query("BEGIN");
-    const rows = await fetchBatch(client);
-
-    if (rows.length === 0) {
-      await client.query("COMMIT");
-      return 0;
-    }
-
-    for (const row of rows) {
-      const topic = resolveTopic(row.event_type);
-      const envelope = readEnvelope(row.payload);
-      const traceId =
-        typeof envelope.traceId === "string" && envelope.traceId.trim().length > 0
-          ? envelope.traceId
-          : row.event_id;
-      const eventType =
-        typeof envelope.eventType === "string" && envelope.eventType.trim().length > 0
-          ? envelope.eventType
-          : row.event_type;
-      const schemaVersion =
-        typeof envelope.schemaVersion === "number" ? envelope.schemaVersion : 1;
-      const eventKind = envelope.eventKind === "domain" ? "domain" : "integration";
-
-      await producer.send({
-        topic,
-        messages: [
-          {
-            key: row.aggregate_id,
-            value: JSON.stringify(row.payload),
-            headers: buildKafkaHeaders({
-              source: serviceName,
-              traceId,
-              eventId: row.event_id,
-              orderId: row.aggregate_id,
-              schemaVersion,
-              eventKind,
-              eventType,
-            }),
-          },
-        ],
-      });
-
-      publishedEventsCounter.inc({
-        service: serviceName,
-        topic,
-        event_type: eventType,
-      });
-
-      await client.query(
-        `UPDATE outbox_events
-         SET published_at = NOW(), updated_at = NOW()
-         WHERE id = $1`,
-        [row.id],
-      );
-    }
-
-    await client.query("COMMIT");
+    const processed = await publishOutboxBatchUseCase({
+      pool,
+      producer,
+      serviceName,
+      batchSize,
+      publishedEventsCounter,
+    });
     publishDurationSeconds.observe(
       { service: serviceName, result: "success" },
       Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
     );
-    return rows.length;
+    return processed;
   } catch (error) {
-    await client.query("ROLLBACK");
     publishFailuresCounter.inc({ service: serviceName });
     publishDurationSeconds.observe(
       { service: serviceName, result: "error" },
@@ -187,8 +100,6 @@ async function publishOnce(): Promise<number> {
     );
     logger.error("outbox publish failed", { error });
     throw error;
-  } finally {
-    client.release();
   }
 }
 

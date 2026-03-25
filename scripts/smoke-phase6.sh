@@ -34,7 +34,9 @@ wait_for_metric_line() {
   local pattern="$3"
 
   for _ in {1..60}; do
-    if curl -sS "${url}" | grep -q "${pattern}"; then
+    local metrics
+    metrics="$(curl -sS "${url}" || true)"
+    if grep -q "${pattern}" <<<"${metrics}"; then
       echo "[phase6] metric check passed: ${name} (${pattern})"
       return 0
     fi
@@ -52,7 +54,7 @@ wait_for_prom_query() {
     local response
     response="$(curl -sG --data-urlencode "query=${query}" http://localhost:9090/api/v1/query || true)"
 
-    if echo "${response}" | grep -q '"status":"success"'; then
+    if grep -q '"status":"success"' <<<"${response}"; then
       echo "[phase6] prometheus query succeeded: ${query}"
       return 0
     fi
@@ -78,7 +80,7 @@ create_order() {
     -H 'Content-Type: application/json' \
     -d "{\"orderId\":\"${order_id}\",\"userId\":\"${user_id}\",\"totalAmount\":${total_amount}}")"
 
-  if ! echo "${response}" | grep -q "\"orderId\":\"${order_id}\""; then
+  if ! grep -q "\"orderId\":\"${order_id}\"" <<<"${response}"; then
     echo "[phase6] create-order failed for ${order_id}, response=${response}" >&2
     return 1
   fi
@@ -100,8 +102,8 @@ wait_for_topic_event_line() {
       --from-beginning \
       --timeout-ms 5000 2>/dev/null || true)"
 
-    matched_line="$(echo "${messages}" | awk -v oid="${order_id}" -v et="${event_type}" '\
-      index($0, "\"orderId\":\"" oid "\"") && index($0, "\"eventType\":\"" et "\"") { print; exit }')"
+    matched_line="$(awk -v oid="${order_id}" -v et="${event_type}" '\
+      index($0, "\"orderId\":\"" oid "\"") && index($0, "\"eventType\":\"" et "\"") { print; exit }' <<<"${messages}")"
 
     if [[ -n "${matched_line}" ]]; then
       echo "${matched_line}"
@@ -123,7 +125,7 @@ wait_for_status() {
     local response
     response="$(curl -sS "http://localhost:3001/orders/${order_id}/status" || true)"
 
-    if echo "${response}" | grep -q "\"status\":\"${expected_status}\""; then
+    if grep -q "\"status\":\"${expected_status}\"" <<<"${response}"; then
       echo "[phase6] order ${order_id} status is ${expected_status}: ${response}"
       return 0
     fi
@@ -147,8 +149,8 @@ wait_for_dlq() {
       --from-beginning \
       --timeout-ms 5000 2>/dev/null || true)"
 
-    matched_line="$(echo "${messages}" | awk -v oid="${order_id}" '\
-      index($0, "\"orderId\":\"" oid "\"") { print; exit }')"
+    matched_line="$(awk -v oid="${order_id}" '\
+      index($0, "\"orderId\":\"" oid "\"") { print; exit }' <<<"${messages}")"
 
     if [[ -n "${matched_line}" ]]; then
       echo "[phase6] found dlq event: ${matched_line}"

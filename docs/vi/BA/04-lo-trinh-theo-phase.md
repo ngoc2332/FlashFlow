@@ -8,6 +8,13 @@ Cập nhật trạng thái (2026-03-22):
 3. Đã có baseline load test: `TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6` => throughput `3.05 req/s`, p95 `0.188 s` (baseline local; NFR throughput vẫn cần tối ưu thêm).
 4. Bộ tài liệu interview cho phase6 đã chốt: test strategy, diagrams, liên kết runbook/playbook sự cố, và kịch bản demo 15 phút.
 
+Cập nhật trạng thái (2026-03-25):
+1. Đã áp dụng baseline tactical DDD cho code runtime:
+   - `order-api`, `order-query-api`, `outbox-publisher`, `payment-worker`, `inventory-worker`, `order-status-updater` đã theo phân lớp `domain` + `application` + `infrastructure`, entrypoint giữ mỏng.
+   - orchestration của worker/updater đã được chuyển về application use case chuyên biệt.
+2. Đã bổ sung tài liệu kiến trúc:
+   - `Tech/06-kien-truc-tham-chieu-ddd.md`.
+
 ## Phase 0: Khởi tạo và chốt thiết kế
 
 1. Chốt scope và requirement IDs trong `BA/02-yeu-cau.md`.

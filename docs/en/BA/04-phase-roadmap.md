@@ -8,6 +8,13 @@ Status update (2026-03-22):
 3. Load baseline captured: `TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6` => throughput `3.05 req/s`, p95 `0.188 s` (local baseline; NFR throughput still needs optimization work).
 4. Interview package assets finalized for phase6: test strategy, diagrams, incident playbooks/runbook references, and 15-minute demo script.
 
+Status update (2026-03-25):
+1. Tactical DDD baseline refactor applied in runtime code:
+   - `order-api`, `order-query-api`, `outbox-publisher`, `payment-worker`, `inventory-worker`, and `order-status-updater` now follow `domain` + `application` + `infrastructure` layering with thin entrypoints.
+   - Worker and updater orchestration is moved into dedicated application use cases.
+2. New architecture reference docs added:
+   - `Tech/06-ddd-reference-architecture.md`.
+
 ## Phase 0: Setup and design alignment
 
 1. Finalize scope and requirement IDs in `BA/02-requirements.md`.

@@ -33,6 +33,26 @@ Dùng playbook này cho mọi feature mới.
 - Để Kafka, DB, Redis operations ở infrastructure adapters.
 - Giữ handler mỏng, gọi domain service cho business rule cốt lõi.
 
+## Service skeleton mặc định
+
+Dùng layout này cho mọi runtime service:
+
+```text
+src/
+  domain/
+  application/
+  infrastructure/
+  interfaces/ (optional)
+  server.ts | worker.ts | publisher.ts | updater.ts
+```
+
+Quy tắc:
+
+- `domain` không được gọi trực tiếp DB/Kafka/HTTP.
+- `application` sở hữu orchestration và transaction boundary.
+- `infrastructure` sở hữu adapter và SQL/client calls.
+- entrypoint phải mỏng (wiring + transport + metrics/logging).
+
 ## Bước 6: Validate
 
 - Chạy unit tests cho aggregate invariants.

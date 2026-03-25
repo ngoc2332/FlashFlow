@@ -5,7 +5,7 @@
 - `Order Management`: `order-api`, order-status updater, `order-query-api`
 - `Payment Processing`: `payment-worker`
 - `Inventory Management`: `inventory-worker`
-- `Customer Communication`: `notification-worker`
+- `Customer Communication`: `notification-worker` (planned)
 
 ## 1) order-api
 
@@ -58,7 +58,7 @@ Kafka:
 
 Trách nhiệm:
 - Trả trạng thái đơn hàng nhanh.
-- Đọc từ Postgres read model kết hợp Redis cache.
+- Đọc từ Postgres read model (`order_status_view`) và fallback sang `orders`.
 
 Input/Output:
 - `GET /orders/{orderId}/status`
@@ -74,6 +74,24 @@ Trách nhiệm:
 
 Kafka:
 - Consumer group: `order-status-updaters`
+
+## Cấu trúc tactical DDD trong code
+
+Mỗi runtime service áp dụng baseline:
+
+- `domain/`: business rules và parse có semantics nghiệp vụ
+- `application/`: use-case orchestration và transaction flow
+- `infrastructure/`: adapter DB/Kafka và persistence operations
+- file entrypoint (`server.ts` / `worker.ts` / `publisher.ts` / `updater.ts`): transport và process lifecycle
+
+Ví dụ đã triển khai:
+
+- `order-api`: `domain/order.ts`, `application/create-order.use-case.ts`, `infrastructure/order-write-repository.ts`
+- `order-query-api`: `domain/order-id.ts`, `application/query-order-status.use-case.ts`, `infrastructure/order-query-repository.ts`
+- `payment-worker`: `domain/order-created-event.ts`, `domain/payment-policy.ts`, `application/process-payment-message.use-case.ts`, `infrastructure/payment-outcome-publisher.ts`, `infrastructure/processed-events-repository.ts`
+- `inventory-worker`: `domain/payment-succeeded-event.ts`, `domain/inventory-policy.ts`, `application/process-inventory-message.use-case.ts`, `infrastructure/inventory-outcome-publisher.ts`, `infrastructure/processed-events-repository.ts`
+- `order-status-updater`: `domain/order-status-policy.ts`, `application/process-status-message.use-case.ts`, `infrastructure/order-status-view-repository.ts`, `infrastructure/order-status-snapshot-publisher.ts`
+- `outbox-publisher`: `domain/outbox-event.ts`, `application/publish-outbox-batch.use-case.ts`, `infrastructure/outbox-repository.ts`, `infrastructure/outbox-kafka-producer.ts`
 
 ## Tóm tắt luồng event
 

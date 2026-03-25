@@ -1,33 +1,29 @@
-import { randomUUID } from "node:crypto";
 import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
 import { Pool } from "pg";
 import {
   EventEnvelope,
-  HeaderValue,
   INVENTORY_EVENTS_TOPIC,
   MetricsRegistry,
-  NonRetryableProcessingError,
   PAYMENT_EVENTS_TOPIC,
-  PAYMENT_SUCCEEDED_EVENT,
   PaymentSucceededPayload,
   RetryPolicy,
-  RetryableProcessingError,
-  buildKafkaHeaders,
   closeMetricsServer,
-  createDeterministicEventId,
-  createInventoryRejectedEvent,
-  createInventoryReservedEvent,
   createJsonLogger,
-  headerToString,
-  nextOffset,
-  normalizeHeaders,
-  parseEventEnvelope,
-  parseRetryCount,
-  resolveRetryTarget,
-  resolveTraceIdFromKafkaHeaders,
   startConsumerLagCollector,
   startMetricsServer,
 } from "@flashflow/common";
+import { InventoryDecision } from "./domain/inventory-policy";
+import { processInventoryMessageUseCase } from "./application/process-inventory-message.use-case";
+import { commitMessageOffset } from "./infrastructure/offset-committer";
+import { readOrderIdFromMessageKey } from "./infrastructure/order-key";
+import {
+  hasProcessedEvent as hasProcessedEventInStore,
+  markProcessedEvent as markProcessedEventInStore,
+} from "./infrastructure/processed-events-repository";
+import {
+  publishInventoryOutcome,
+  routeInventoryMessageToRetryOrDlq,
+} from "./infrastructure/inventory-outcome-publisher";
 
 const postgresUrl =
   process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
@@ -139,105 +135,8 @@ let inFlightMessages = 0;
 let runPromise: Promise<void> | undefined;
 let shutdownPromise: Promise<void> | undefined;
 
-function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
-  if (Buffer.isBuffer(message.key)) {
-    return message.key.toString("utf8");
-  }
-
-  if (typeof message.key === "string") {
-    return message.key;
-  }
-
-  return "unknown-order";
-}
-
-function parseEnvelope(rawValue: Buffer | null): EventEnvelope<unknown> {
-  return parseEventEnvelope(rawValue);
-}
-
-function parsePaymentSucceededEvent(
-  event: EventEnvelope<unknown>,
-): EventEnvelope<PaymentSucceededPayload> | undefined {
-  if (event.eventType !== PAYMENT_SUCCEEDED_EVENT) {
-    return undefined;
-  }
-
-  if (!event.payload || typeof event.payload !== "object") {
-    throw new NonRetryableProcessingError("payment.succeeded payload is required");
-  }
-
-  const payload = event.payload as Partial<PaymentSucceededPayload>;
-
-  if (typeof payload.userId !== "string" || payload.userId.trim().length === 0) {
-    throw new NonRetryableProcessingError("payment.succeeded payload.userId is required");
-  }
-
-  if (
-    typeof payload.totalAmount !== "number" ||
-    !Number.isFinite(payload.totalAmount) ||
-    payload.totalAmount <= 0
-  ) {
-    throw new NonRetryableProcessingError(
-      "payment.succeeded payload.totalAmount must be a number > 0",
-    );
-  }
-
-  return {
-    ...event,
-    payload: {
-      userId: payload.userId,
-      totalAmount: payload.totalAmount,
-      paymentId:
-        typeof payload.paymentId === "string" && payload.paymentId.trim().length > 0
-          ? payload.paymentId
-          : randomUUID(),
-      provider:
-        typeof payload.provider === "string" && payload.provider.trim().length > 0
-          ? payload.provider
-          : "mock-gateway",
-    },
-  };
-}
-
-type InventoryDecision =
-  | {
-      status: "reserved";
-    }
-  | {
-      status: "rejected";
-      reason: string;
-    };
-
-function decideInventory(event: EventEnvelope<PaymentSucceededPayload>): InventoryDecision {
-  if (event.payload.userId.startsWith(failUserPrefix)) {
-    throw new RetryableProcessingError("Mock inventory service timeout");
-  }
-
-  if (event.payload.userId.startsWith(rejectUserPrefix)) {
-    return {
-      status: "rejected",
-      reason: "INVENTORY_REJECTED_BY_TEST_RULE",
-    };
-  }
-
-  if (event.payload.totalAmount > reserveLimit) {
-    return {
-      status: "rejected",
-      reason: "INVENTORY_OUT_OF_STOCK",
-    };
-  }
-
-  return { status: "reserved" };
-}
-
 async function commitOffset(payload: EachMessagePayload): Promise<void> {
-  await consumer.commitOffsets([
-    {
-      topic: payload.topic,
-      partition: payload.partition,
-      offset: nextOffset(payload.message.offset),
-    },
-  ]);
+  await commitMessageOffset(consumer, payload);
 
   offsetCommitsCounter.inc({
     service: serviceName,
@@ -246,85 +145,29 @@ async function commitOffset(payload: EachMessagePayload): Promise<void> {
   });
 }
 
-async function hasProcessedEvent(eventId: string): Promise<boolean> {
-  const result = await pool.query(
-    `SELECT 1
-     FROM processed_events
-     WHERE event_id = $1::uuid
-       AND consumer_group = $2
-     LIMIT 1`,
-    [eventId, consumerGroup],
-  );
-
-  return (result.rowCount ?? 0) > 0;
-}
-
-async function markProcessedEvent(eventId: string): Promise<void> {
-  await pool.query(
-    `INSERT INTO processed_events (event_id, consumer_group, processed_at)
-     VALUES ($1::uuid, $2, NOW())
-     ON CONFLICT (event_id, consumer_group) DO NOTHING`,
-    [eventId, consumerGroup],
-  );
-}
-
 async function publishOutcome(
   event: EventEnvelope<PaymentSucceededPayload>,
   decision: InventoryDecision,
 ): Promise<void> {
-  const outputEventType =
-    decision.status === "reserved" ? "inventory.reserved" : "inventory.rejected";
-  const outputEventId = createDeterministicEventId(`${event.eventId}:${outputEventType}`);
-
-  const inventoryEvent =
-    decision.status === "reserved"
-      ? createInventoryReservedEvent({
-          eventId: outputEventId,
-          orderId: event.orderId,
-          userId: event.payload.userId,
-          totalAmount: event.payload.totalAmount,
-          traceId: event.traceId,
-        })
-      : createInventoryRejectedEvent({
-          eventId: outputEventId,
-          orderId: event.orderId,
-          userId: event.payload.userId,
-          totalAmount: event.payload.totalAmount,
-          traceId: event.traceId,
-          reason: decision.reason,
-        });
-
-  await producer.send({
-    topic: inventoryEventsTopic,
-    messages: [
-      {
-        key: event.orderId,
-        value: JSON.stringify(inventoryEvent),
-        headers: buildKafkaHeaders({
-          source: serviceName,
-          traceId: inventoryEvent.traceId,
-          eventId: inventoryEvent.eventId,
-          orderId: inventoryEvent.orderId,
-          schemaVersion: inventoryEvent.schemaVersion,
-          eventKind: inventoryEvent.eventKind,
-          eventType: inventoryEvent.eventType,
-        }),
-      },
-    ],
+  const published = await publishInventoryOutcome(producer, {
+    serviceName,
+    outputTopic: inventoryEventsTopic,
+    event,
+    decision,
   });
 
   producedEventsCounter.inc({
     service: serviceName,
     consumer_group: consumerGroup,
     topic: inventoryEventsTopic,
-    event_type: inventoryEvent.eventType,
+    event_type: published.eventType,
   });
 
   logger.info("inventory outcome published", {
-    orderId: inventoryEvent.orderId,
-    eventId: inventoryEvent.eventId,
-    eventType: inventoryEvent.eventType,
-    traceId: inventoryEvent.traceId,
+    orderId: published.orderId,
+    eventId: published.eventId,
+    eventType: published.eventType,
+    traceId: published.traceId,
     outputTopic: inventoryEventsTopic,
   });
 }
@@ -333,43 +176,16 @@ async function routeToRetryOrDlq(
   payload: EachMessagePayload,
   orderId: string,
   error: Error,
-): Promise<{ terminal: boolean; targetTopic: string }> {
-  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
-  const retryCount = parseRetryCount(headers);
-  const route = resolveRetryTarget(error, retryCount, retryPolicy);
-  const normalizedHeaders = normalizeHeaders(headers);
-  const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
-  const traceId =
-    resolveTraceIdFromKafkaHeaders(headers) ?? normalizedHeaders.traceId ?? normalizedHeaders["x-trace-id"];
-
-  await producer.send({
-    topic: route.topic,
-    messages: [
-      {
-        key: orderId,
-        value: messageValue,
-        headers: {
-          ...normalizedHeaders,
-          ...buildKafkaHeaders({
-            source: serviceName,
-            traceId,
-            eventId: normalizedHeaders.eventId,
-            orderId,
-            eventType: normalizedHeaders.eventType,
-          }),
-          retryCount: String(route.nextRetryCount),
-          sourceTopic: payload.topic,
-          sourceService: serviceName,
-          targetWorker: serviceName,
-          errorType: error.name,
-          errorMessage: error.message,
-          failedAt: new Date().toISOString(),
-        },
-      },
-    ],
+): Promise<{ terminal: boolean; targetTopic: string; traceId: string; retryCount: number }> {
+  const route = await routeInventoryMessageToRetryOrDlq(producer, {
+    serviceName,
+    retryPolicy,
+    payload,
+    orderId,
+    error,
   });
 
-  if (route.topic === retryPolicy.dlqTopic) {
+  if (route.targetTopic === retryPolicy.dlqTopic) {
     dlqEventsCounter.inc({
       service: serviceName,
       consumer_group: consumerGroup,
@@ -380,120 +196,11 @@ async function routeToRetryOrDlq(
       service: serviceName,
       consumer_group: consumerGroup,
       topic: payload.topic,
-      target_topic: route.topic,
+      target_topic: route.targetTopic,
     });
   }
 
-  logger.error("message routed to retry or dlq", {
-    traceId,
-    orderId,
-    sourceTopic: payload.topic,
-    targetTopic: route.topic,
-    terminal: route.terminal,
-    retryCount,
-    error,
-  });
-
-  return {
-    terminal: route.terminal,
-    targetTopic: route.topic,
-  };
-}
-
-async function handleMessage(payload: EachMessagePayload): Promise<void> {
-  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
-  const targetWorker = headerToString(headers?.targetWorker);
-  const startedAt = process.hrtime.bigint();
-  let result = "success";
-
-  if (payload.topic !== paymentEventsTopic && targetWorker !== serviceName) {
-    await commitOffset(payload);
-    result = "skipped_target_worker";
-    processingDurationSeconds.observe(
-      {
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-        result,
-      },
-      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-    );
-    return;
-  }
-
-  let envelope: EventEnvelope<unknown> | undefined;
-
-  try {
-    envelope = parseEnvelope(payload.message.value);
-
-    if (await hasProcessedEvent(envelope.eventId)) {
-      duplicateEventsCounter.inc({
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-      });
-      logger.info("duplicate event skipped", {
-        traceId: envelope.traceId,
-        orderId: envelope.orderId,
-        eventId: envelope.eventId,
-        topic: payload.topic,
-      });
-      await commitOffset(payload);
-      result = "duplicate";
-      return;
-    }
-
-    const paymentSucceededEvent = parsePaymentSucceededEvent(envelope);
-
-    if (!paymentSucceededEvent) {
-      await commitOffset(payload);
-      result = "ignored_event_type";
-      return;
-    }
-
-    const decision = decideInventory(paymentSucceededEvent);
-
-    await publishOutcome(paymentSucceededEvent, decision);
-    await markProcessedEvent(envelope.eventId);
-    await commitOffset(payload);
-
-    processedEventsCounter.inc({
-      service: serviceName,
-      consumer_group: consumerGroup,
-      topic: payload.topic,
-      event_type: envelope.eventType,
-    });
-    result = "processed";
-  } catch (rawError) {
-    const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
-    const orderId = envelope?.orderId ?? readOrderIdFromKey(payload.message);
-
-    processingFailuresCounter.inc({
-      service: serviceName,
-      consumer_group: consumerGroup,
-      topic: payload.topic,
-      error_type: error.name,
-    });
-
-    const route = await routeToRetryOrDlq(payload, orderId, error);
-
-    if (route.terminal && envelope) {
-      await markProcessedEvent(envelope.eventId);
-    }
-
-    await commitOffset(payload);
-    result = route.terminal ? "routed_dlq" : "routed_retry";
-  } finally {
-    processingDurationSeconds.observe(
-      {
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-        result,
-      },
-      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-    );
-  }
+  return route;
 }
 
 async function start(): Promise<void> {
@@ -542,7 +249,28 @@ async function start(): Promise<void> {
       );
 
       try {
-        await handleMessage(payload);
+        await processInventoryMessageUseCase({
+          payload,
+          serviceName,
+          consumerGroup,
+          paymentEventsTopic,
+          failUserPrefix,
+          rejectUserPrefix,
+          reserveLimit,
+          hasProcessedEvent: (eventId) => hasProcessedEventInStore(pool, eventId, consumerGroup),
+          markProcessedEvent: (eventId) => markProcessedEventInStore(pool, eventId, consumerGroup),
+          commitOffset,
+          readOrderIdFromMessageKey,
+          publishOutcome,
+          routeToRetryOrDlq,
+          metrics: {
+            processedEventsCounter,
+            duplicateEventsCounter,
+            processingFailuresCounter,
+            processingDurationSeconds,
+          },
+          logger,
+        });
       } catch (error) {
         logger.error("inventory-worker failed to handle message", { error });
       } finally {

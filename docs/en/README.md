@@ -32,6 +32,7 @@ This docs set is optimized for:
 7. `Tech/03-data-db-cache.md`
 8. `Tech/04-ddd-edd-playbook.md`
 9. `Tech/05-database-design-and-operations.md`
-10. `Infra/01-local-stack.md`
-11. `Infra/02-observability-runbook.md`
-12. `Interview/01-interview-package.md`
+10. `Tech/06-ddd-reference-architecture.md`
+11. `Infra/01-local-stack.md`
+12. `Infra/02-observability-runbook.md`
+13. `Interview/01-interview-package.md`

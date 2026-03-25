@@ -33,6 +33,26 @@ Use this playbook for every new feature.
 - Keep Kafka, DB, Redis operations in infrastructure adapters.
 - Keep handlers thin; call domain services for core rules.
 
+## Default service skeleton
+
+Use this folder layout for every runtime service:
+
+```text
+src/
+  domain/
+  application/
+  infrastructure/
+  interfaces/ (optional)
+  server.ts | worker.ts | publisher.ts | updater.ts
+```
+
+Rules:
+
+- `domain` has zero direct DB/Kafka/HTTP calls.
+- `application` owns orchestration and transaction boundaries.
+- `infrastructure` owns adapters and SQL/client calls.
+- entrypoint files stay thin (wiring + transport + metrics/logging).
+
 ## Step 6: Validate
 
 - Run unit tests for aggregate invariants.

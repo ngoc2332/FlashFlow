@@ -2,30 +2,28 @@ import { Consumer, EachMessagePayload, Kafka, Producer } from "kafkajs";
 import { Pool } from "pg";
 import {
   EventEnvelope,
-  HeaderValue,
   MetricsRegistry,
-  NonRetryableProcessingError,
   ORDER_CREATED_EVENT,
   OrderCreatedPayload,
   PAYMENT_EVENTS_TOPIC,
   RetryPolicy,
-  RetryableProcessingError,
-  buildKafkaHeaders,
   closeMetricsServer,
-  createDeterministicEventId,
   createJsonLogger,
-  createPaymentFailedEvent,
-  createPaymentSucceededEvent,
-  headerToString,
-  nextOffset,
-  normalizeHeaders,
-  parseEventEnvelope,
-  parseRetryCount,
-  resolveRetryTarget,
-  resolveTraceIdFromKafkaHeaders,
   startConsumerLagCollector,
   startMetricsServer,
 } from "@flashflow/common";
+import { PaymentDecision } from "./domain/payment-policy";
+import { processPaymentMessageUseCase } from "./application/process-payment-message.use-case";
+import { commitMessageOffset } from "./infrastructure/offset-committer";
+import { readOrderIdFromMessageKey } from "./infrastructure/order-key";
+import {
+  hasProcessedEvent as hasProcessedEventInStore,
+  markProcessedEvent as markProcessedEventInStore,
+} from "./infrastructure/processed-events-repository";
+import {
+  publishPaymentOutcome,
+  routePaymentMessageToRetryOrDlq,
+} from "./infrastructure/payment-outcome-publisher";
 
 const postgresUrl =
   process.env.POSTGRES_URL ?? "postgres://flashflow:flashflow@localhost:5432/flashflow";
@@ -138,82 +136,8 @@ let inFlightMessages = 0;
 let runPromise: Promise<void> | undefined;
 let shutdownPromise: Promise<void> | undefined;
 
-function readOrderIdFromKey(message: EachMessagePayload["message"]): string {
-  if (Buffer.isBuffer(message.key)) {
-    return message.key.toString("utf8");
-  }
-
-  if (typeof message.key === "string") {
-    return message.key;
-  }
-
-  return "unknown-order";
-}
-
-function parseOrderCreatedEvent(rawValue: Buffer | null): EventEnvelope<OrderCreatedPayload> {
-  return parseEventEnvelope<OrderCreatedPayload>(rawValue, {
-    expectedEventType: ORDER_CREATED_EVENT,
-    parsePayload: (rawPayload) => {
-      if (!rawPayload || typeof rawPayload !== "object") {
-        throw new NonRetryableProcessingError("payload is required");
-      }
-
-      const payload = rawPayload as Partial<OrderCreatedPayload>;
-
-      if (typeof payload.userId !== "string" || payload.userId.trim().length === 0) {
-        throw new NonRetryableProcessingError("payload.userId is required");
-      }
-
-      if (
-        typeof payload.totalAmount !== "number" ||
-        !Number.isFinite(payload.totalAmount) ||
-        payload.totalAmount <= 0
-      ) {
-        throw new NonRetryableProcessingError("payload.totalAmount must be a number > 0");
-      }
-
-      return {
-        userId: payload.userId,
-        totalAmount: payload.totalAmount,
-      };
-    },
-  });
-}
-
-type PaymentDecision =
-  | {
-      status: "succeeded";
-    }
-  | {
-      status: "failed";
-      reason: string;
-      retryable: false;
-    };
-
-function decidePayment(event: EventEnvelope<OrderCreatedPayload>): PaymentDecision {
-  if (event.payload.userId.startsWith(failUserPrefix)) {
-    throw new RetryableProcessingError("Mock payment gateway timeout");
-  }
-
-  if (event.payload.totalAmount > approvalLimit) {
-    return {
-      status: "failed",
-      reason: "PAYMENT_DECLINED_LIMIT_EXCEEDED",
-      retryable: false,
-    };
-  }
-
-  return { status: "succeeded" };
-}
-
 async function commitOffset(payload: EachMessagePayload): Promise<void> {
-  await consumer.commitOffsets([
-    {
-      topic: payload.topic,
-      partition: payload.partition,
-      offset: nextOffset(payload.message.offset),
-    },
-  ]);
+  await commitMessageOffset(consumer, payload);
 
   offsetCommitsCounter.inc({
     service: serviceName,
@@ -222,86 +146,29 @@ async function commitOffset(payload: EachMessagePayload): Promise<void> {
   });
 }
 
-async function hasProcessedEvent(eventId: string): Promise<boolean> {
-  const result = await pool.query(
-    `SELECT 1
-     FROM processed_events
-     WHERE event_id = $1::uuid
-       AND consumer_group = $2
-     LIMIT 1`,
-    [eventId, consumerGroup],
-  );
-
-  return (result.rowCount ?? 0) > 0;
-}
-
-async function markProcessedEvent(eventId: string): Promise<void> {
-  await pool.query(
-    `INSERT INTO processed_events (event_id, consumer_group, processed_at)
-     VALUES ($1::uuid, $2, NOW())
-     ON CONFLICT (event_id, consumer_group) DO NOTHING`,
-    [eventId, consumerGroup],
-  );
-}
-
 async function publishOutcome(
   event: EventEnvelope<OrderCreatedPayload>,
   decision: PaymentDecision,
 ): Promise<void> {
-  const outputEventType =
-    decision.status === "succeeded" ? "payment.succeeded" : "payment.failed";
-  const outputEventId = createDeterministicEventId(`${event.eventId}:${outputEventType}`);
-
-  const paymentEvent =
-    decision.status === "succeeded"
-      ? createPaymentSucceededEvent({
-          eventId: outputEventId,
-          orderId: event.orderId,
-          userId: event.payload.userId,
-          totalAmount: event.payload.totalAmount,
-          traceId: event.traceId,
-        })
-      : createPaymentFailedEvent({
-          eventId: outputEventId,
-          orderId: event.orderId,
-          userId: event.payload.userId,
-          totalAmount: event.payload.totalAmount,
-          reason: decision.reason,
-          retryable: decision.retryable,
-          traceId: event.traceId,
-        });
-
-  await producer.send({
-    topic: paymentEventsTopic,
-    messages: [
-      {
-        key: event.orderId,
-        value: JSON.stringify(paymentEvent),
-        headers: buildKafkaHeaders({
-          source: serviceName,
-          traceId: paymentEvent.traceId,
-          eventId: paymentEvent.eventId,
-          orderId: paymentEvent.orderId,
-          schemaVersion: paymentEvent.schemaVersion,
-          eventKind: paymentEvent.eventKind,
-          eventType: paymentEvent.eventType,
-        }),
-      },
-    ],
+  const published = await publishPaymentOutcome(producer, {
+    serviceName,
+    outputTopic: paymentEventsTopic,
+    event,
+    decision,
   });
 
   producedEventsCounter.inc({
     service: serviceName,
     consumer_group: consumerGroup,
     topic: paymentEventsTopic,
-    event_type: paymentEvent.eventType,
+    event_type: published.eventType,
   });
 
   logger.info("payment outcome published", {
-    orderId: paymentEvent.orderId,
-    eventId: paymentEvent.eventId,
-    eventType: paymentEvent.eventType,
-    traceId: paymentEvent.traceId,
+    orderId: published.orderId,
+    eventId: published.eventId,
+    eventType: published.eventType,
+    traceId: published.traceId,
     outputTopic: paymentEventsTopic,
   });
 }
@@ -310,43 +177,16 @@ async function routeToRetryOrDlq(
   payload: EachMessagePayload,
   orderId: string,
   error: Error,
-): Promise<{ terminal: boolean; targetTopic: string }> {
-  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
-  const retryCount = parseRetryCount(headers);
-  const route = resolveRetryTarget(error, retryCount, retryPolicy);
-  const normalizedHeaders = normalizeHeaders(headers);
-  const messageValue = payload.message.value ? payload.message.value.toString("utf8") : "{}";
-  const traceId =
-    resolveTraceIdFromKafkaHeaders(headers) ?? normalizedHeaders.traceId ?? normalizedHeaders["x-trace-id"];
-
-  await producer.send({
-    topic: route.topic,
-    messages: [
-      {
-        key: orderId,
-        value: messageValue,
-        headers: {
-          ...normalizedHeaders,
-          ...buildKafkaHeaders({
-            source: serviceName,
-            traceId,
-            eventId: normalizedHeaders.eventId,
-            orderId,
-            eventType: normalizedHeaders.eventType,
-          }),
-          retryCount: String(route.nextRetryCount),
-          sourceTopic: payload.topic,
-          sourceService: serviceName,
-          targetWorker: serviceName,
-          errorType: error.name,
-          errorMessage: error.message,
-          failedAt: new Date().toISOString(),
-        },
-      },
-    ],
+): Promise<{ terminal: boolean; targetTopic: string; traceId: string; retryCount: number }> {
+  const route = await routePaymentMessageToRetryOrDlq(producer, {
+    serviceName,
+    retryPolicy,
+    payload,
+    orderId,
+    error,
   });
 
-  if (route.topic === retryPolicy.dlqTopic) {
+  if (route.targetTopic === retryPolicy.dlqTopic) {
     dlqEventsCounter.inc({
       service: serviceName,
       consumer_group: consumerGroup,
@@ -357,111 +197,11 @@ async function routeToRetryOrDlq(
       service: serviceName,
       consumer_group: consumerGroup,
       topic: payload.topic,
-      target_topic: route.topic,
+      target_topic: route.targetTopic,
     });
   }
 
-  logger.error("message routed to retry or dlq", {
-    traceId,
-    orderId,
-    sourceTopic: payload.topic,
-    targetTopic: route.topic,
-    terminal: route.terminal,
-    retryCount,
-    error,
-  });
-
-  return {
-    terminal: route.terminal,
-    targetTopic: route.topic,
-  };
-}
-
-async function handleMessage(payload: EachMessagePayload): Promise<void> {
-  const headers = payload.message.headers as Record<string, HeaderValue> | undefined;
-  const targetWorker = headerToString(headers?.targetWorker);
-  const startedAt = process.hrtime.bigint();
-  let result = "success";
-
-  if (payload.topic !== ORDER_CREATED_EVENT && targetWorker !== serviceName) {
-    await commitOffset(payload);
-    result = "skipped_target_worker";
-    processingDurationSeconds.observe(
-      {
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-        result,
-      },
-      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-    );
-    return;
-  }
-
-  let event: EventEnvelope<OrderCreatedPayload> | undefined;
-
-  try {
-    event = parseOrderCreatedEvent(payload.message.value);
-
-    if (await hasProcessedEvent(event.eventId)) {
-      duplicateEventsCounter.inc({
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-      });
-      logger.info("duplicate event skipped", {
-        traceId: event.traceId,
-        orderId: event.orderId,
-        eventId: event.eventId,
-        topic: payload.topic,
-      });
-      await commitOffset(payload);
-      result = "duplicate";
-      return;
-    }
-
-    const decision = decidePayment(event);
-    await publishOutcome(event, decision);
-    await markProcessedEvent(event.eventId);
-    await commitOffset(payload);
-
-    processedEventsCounter.inc({
-      service: serviceName,
-      consumer_group: consumerGroup,
-      topic: payload.topic,
-      event_type: event.eventType,
-    });
-    result = "processed";
-  } catch (rawError) {
-    const error = rawError instanceof Error ? rawError : new Error("Unknown processing error");
-    const orderId = event?.orderId ?? readOrderIdFromKey(payload.message);
-
-    processingFailuresCounter.inc({
-      service: serviceName,
-      consumer_group: consumerGroup,
-      topic: payload.topic,
-      error_type: error.name,
-    });
-
-    const route = await routeToRetryOrDlq(payload, orderId, error);
-
-    if (route.terminal && event) {
-      await markProcessedEvent(event.eventId);
-    }
-
-    await commitOffset(payload);
-    result = route.terminal ? "routed_dlq" : "routed_retry";
-  } finally {
-    processingDurationSeconds.observe(
-      {
-        service: serviceName,
-        consumer_group: consumerGroup,
-        topic: payload.topic,
-        result,
-      },
-      Number(process.hrtime.bigint() - startedAt) / 1_000_000_000,
-    );
-  }
+  return route;
 }
 
 async function start(): Promise<void> {
@@ -510,7 +250,27 @@ async function start(): Promise<void> {
       );
 
       try {
-        await handleMessage(payload);
+        await processPaymentMessageUseCase({
+          payload,
+          serviceName,
+          consumerGroup,
+          orderCreatedTopic: ORDER_CREATED_EVENT,
+          failUserPrefix,
+          approvalLimit,
+          hasProcessedEvent: (eventId) => hasProcessedEventInStore(pool, eventId, consumerGroup),
+          markProcessedEvent: (eventId) => markProcessedEventInStore(pool, eventId, consumerGroup),
+          commitOffset,
+          readOrderIdFromMessageKey,
+          publishOutcome,
+          routeToRetryOrDlq,
+          metrics: {
+            processedEventsCounter,
+            duplicateEventsCounter,
+            processingFailuresCounter,
+            processingDurationSeconds,
+          },
+          logger,
+        });
       } catch (error) {
         logger.error("payment-worker failed to handle message", { error });
       } finally {

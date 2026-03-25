@@ -32,6 +32,7 @@ Bộ tài liệu này tối ưu cho:
 7. `Tech/03-thiet-ke-du-lieu-db-cache.md`
 8. `Tech/04-huong-dan-ddd-edd.md`
 9. `Tech/05-thiet-ke-va-van-hanh-database.md`
-10. `Infra/01-ha-tang-local.md`
-11. `Infra/02-observability-va-runbook.md`
-12. `Interview/01-goi-noi-dung-phong-van.md`
+10. `Tech/06-kien-truc-tham-chieu-ddd.md`
+11. `Infra/01-ha-tang-local.md`
+12. `Infra/02-observability-va-runbook.md`
+13. `Interview/01-goi-noi-dung-phong-van.md`

@@ -1,12 +1,9 @@
 import { randomUUID } from "node:crypto";
 import express from "express";
 import { Pool } from "pg";
-import {
-  MetricsRegistry,
-  createJsonLogger,
-  createOrderCreatedEvent,
-  toHttpTraceId,
-} from "@flashflow/common";
+import { MetricsRegistry, createJsonLogger, toHttpTraceId } from "@flashflow/common";
+import { createOrderUseCase } from "./application/create-order.use-case";
+import { buildCreateOrderCommand } from "./domain/order";
 
 const app = express();
 app.use(express.json());
@@ -85,21 +82,21 @@ app.get("/metrics", (_req, res) => {
 });
 
 app.post("/orders", async (req, res) => {
-  const userId = typeof req.body?.userId === "string" ? req.body.userId.trim() : "";
-  const totalAmount = Number(req.body?.totalAmount);
   const traceId = resolveTraceId(req.headers as Record<string, unknown>);
 
   res.setHeader("x-trace-id", traceId);
 
-  if (!userId || !Number.isFinite(totalAmount) || totalAmount <= 0) {
+  const commandResult = buildCreateOrderCommand(req.body, randomUUID);
+
+  if (!commandResult.ok) {
     orderCreateFailuresCounter.inc({
       service: serviceName,
       reason: "invalid_payload",
     });
     logger.warn("order create rejected due to invalid payload", {
       traceId,
-      userId,
-      totalAmount,
+      userId: commandResult.error.userId,
+      totalAmount: commandResult.error.totalAmount,
     });
     res.status(400).json({
       message: "Invalid payload. Expect { userId: string, totalAmount: number > 0 }",
@@ -108,59 +105,28 @@ app.post("/orders", async (req, res) => {
     return;
   }
 
-  const orderId =
-    typeof req.body?.orderId === "string" && req.body.orderId.trim().length > 0
-      ? req.body.orderId.trim()
-      : randomUUID();
-
-  const event = createOrderCreatedEvent({ orderId, userId, totalAmount, traceId });
-
-  const client = await pool.connect();
-
   try {
-    await client.query("BEGIN");
-
-    await client.query(
-      `INSERT INTO orders (order_id, user_id, status, total_amount, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, NOW(), NOW())`,
-      [orderId, userId, "PENDING_PAYMENT", totalAmount],
-    );
-
-    await client.query(
-      `INSERT INTO outbox_events (id, event_id, aggregate_id, event_type, payload, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, $5::jsonb, NOW(), NOW())`,
-      [randomUUID(), event.eventId, orderId, event.eventType, JSON.stringify(event)],
-    );
-
-    await client.query(
-      `INSERT INTO order_status_view (order_id, current_status, last_event_id, last_updated_at)
-       VALUES ($1, $2, $3, NOW())
-       ON CONFLICT (order_id) DO UPDATE
-       SET current_status = EXCLUDED.current_status,
-           last_event_id = EXCLUDED.last_event_id,
-           last_updated_at = NOW()`,
-      [orderId, "PENDING_PAYMENT", event.eventId],
-    );
-
-    await client.query("COMMIT");
+    const created = await createOrderUseCase({
+      command: commandResult.command,
+      traceId,
+      pool,
+    });
 
     ordersCreatedCounter.inc({ service: serviceName });
     logger.info("order created", {
-      traceId: event.traceId,
-      orderId,
-      eventId: event.eventId,
-      totalAmount,
+      traceId: created.traceId,
+      orderId: created.orderId,
+      eventId: created.eventId,
+      totalAmount: created.totalAmount,
     });
 
     res.status(201).json({
-      orderId,
-      eventId: event.eventId,
-      status: "PENDING_PAYMENT",
-      traceId: event.traceId,
+      orderId: created.orderId,
+      eventId: created.eventId,
+      status: created.status,
+      traceId: created.traceId,
     });
   } catch (error) {
-    await client.query("ROLLBACK");
-
     if ((error as { code?: string }).code === "23505") {
       orderCreateFailuresCounter.inc({
         service: serviceName,
@@ -168,7 +134,7 @@ app.post("/orders", async (req, res) => {
       });
       logger.warn("order create conflict", {
         traceId,
-        orderId,
+        orderId: commandResult.command.orderId,
         error,
       });
       res.status(409).json({ message: "Order already exists" });
@@ -181,12 +147,10 @@ app.post("/orders", async (req, res) => {
     });
     logger.error("order create failed", {
       traceId,
-      orderId,
+      orderId: commandResult.command.orderId,
       error,
     });
     res.status(500).json({ message: "Failed to create order", error: (error as Error).message });
-  } finally {
-    client.release();
   }
 });
 
