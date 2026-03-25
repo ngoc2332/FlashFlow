@@ -56,3 +56,18 @@
 3. Inject a failure and show retry then DLQ.
 4. Show metrics dashboard and lag behavior.
 5. Explain one incident with DDD/EDD tradeoff decisions.
+
+## 5) Phase 6 assets checklist
+
+- Test strategy and command map: `docs/en/Interview/02-phase6-test-strategy.md`
+- System diagrams (context + sequence): `docs/en/Interview/03-system-diagrams.md`
+- 15-minute demo script: `docs/en/Interview/04-demo-script-15-min.md`
+- Load test baseline report: `docs/en/Interview/02-load-test-baseline.md`
+
+## 6) Quick commands
+
+```bash
+make unit-phase6
+make smoke-phase6
+TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6
+```

@@ -1,6 +1,6 @@
 SHELL := /bin/bash
 
-.PHONY: up up-phase1 up-phase2 up-phase3 up-phase4 up-phase5 down logs migrate topics install dev-order-api dev-order-query-api dev-outbox dev-payment dev-inventory dev-status-updater smoke-phase1 smoke-phase2 smoke-phase3 smoke-phase4 schema-phase4
+.PHONY: up up-phase1 up-phase2 up-phase3 up-phase4 up-phase5 up-phase6 down logs migrate topics install dev-order-api dev-order-query-api dev-outbox dev-payment dev-inventory dev-status-updater smoke-phase1 smoke-phase2 smoke-phase3 smoke-phase4 smoke-phase6 unit-phase6 load-phase6 schema-phase4
 
 up:
 	docker compose up -d kafka schema-registry kafka-ui postgres redis
@@ -18,6 +18,9 @@ up-phase4:
 	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase4 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater
 
 up-phase5:
+	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase5 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater prometheus grafana
+
+up-phase6:
 	DOCKER_BUILDKIT=0 COMPOSE_DOCKER_CLI_BUILD=0 docker compose --profile phase5 up -d --build order-api order-query-api outbox-publisher payment-worker inventory-worker order-status-updater prometheus grafana
 
 down:
@@ -64,6 +67,15 @@ smoke-phase3:
 
 smoke-phase4:
 	./scripts/smoke-phase4.sh
+
+unit-phase6:
+	./scripts/unit-phase6.sh
+
+smoke-phase6:
+	./scripts/smoke-phase6.sh
+
+load-phase6:
+	./scripts/load-phase6.sh
 
 schema-phase4:
 	./scripts/schema-registry-phase4.sh

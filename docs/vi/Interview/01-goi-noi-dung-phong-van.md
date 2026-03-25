@@ -56,3 +56,18 @@
 3. Tiêm lỗi và trình bày retry sau đó vào DLQ.
 4. Mở dashboard metrics và giải thích hành vi lag.
 5. Kết bài bằng một incident và tradeoff quyết định theo DDD/EDD.
+
+## 5) Checklist tài sản Phase 6
+
+- Chiến lược test và map lệnh chạy: `docs/vi/Interview/02-chien-luoc-test-phase6.md`
+- Sơ đồ hệ thống (context + sequence): `docs/vi/Interview/03-so-do-he-thong.md`
+- Kịch bản demo 15 phút: `docs/vi/Interview/04-kich-ban-demo-15-phut.md`
+- Báo cáo baseline load test: `docs/vi/Interview/02-bao-cao-load-test-phase6.md`
+
+## 6) Lệnh chạy nhanh
+
+```bash
+make unit-phase6
+make smoke-phase6
+TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6
+```

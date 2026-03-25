@@ -22,6 +22,10 @@ Realtime Commerce Event Platform for Kafka practice.
 
 `Metrics + JSON logs + tracing headers + Prometheus/Grafana dashboard + runbook`
 
+## Phase 6 slice
+
+`Unit + integration + failure/recovery tests + load baseline + interview package`
+
 ## Stack
 
 - Node.js + TypeScript (workspaces)
@@ -78,6 +82,12 @@ Start phase5 services and observability stack:
 
 ```bash
 make up-phase5
+```
+
+Start phase6 stack (same runtime profile as phase5):
+
+```bash
+make up-phase6
 ```
 
 Alternative local mode (requires Node.js + npm):
@@ -193,6 +203,29 @@ This checks:
 - Prometheus: `http://localhost:9090`
 - Grafana: `http://localhost:3002` (default `admin/admin`)
 
+## Test and performance (Phase 6)
+
+- Unit invariants:
+
+```bash
+make unit-phase6
+```
+
+- Full integration/failure/recovery smoke:
+
+```bash
+make smoke-phase6
+```
+
+- Load baseline:
+
+```bash
+TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6
+```
+
+- Generated load report:
+  - `docs/en/Interview/02-load-test-baseline.md`
+
 ## Requirement mapping (Phase 1)
 
 - `FR-01`, `KR-01`, `KR-02`, `KR-07`, `DER-01`, `DER-03`, `TR-01`
@@ -212,3 +245,7 @@ This checks:
 ## Requirement mapping (Phase 5)
 
 - `FR-06`, `KR-06`, `KR-07`, `NFR-05`, `DER-06`, `TR-02`
+
+## Requirement mapping (Phase 6)
+
+- `NFR-01`, `NFR-02`, `NFR-03`, `NFR-04`, `NFR-05`, `TR-01`, `TR-02`

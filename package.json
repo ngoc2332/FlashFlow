@@ -19,7 +19,10 @@
     "start:outbox": "npm run start -w @flashflow/outbox-publisher",
     "start:payment": "npm run start -w @flashflow/payment-worker",
     "start:inventory": "npm run start -w @flashflow/inventory-worker",
-    "start:status-updater": "npm run start -w @flashflow/order-status-updater"
+    "start:status-updater": "npm run start -w @flashflow/order-status-updater",
+    "unit:phase6": "./scripts/unit-phase6.sh",
+    "smoke:phase6": "./scripts/smoke-phase6.sh",
+    "load:phase6": "./scripts/load-phase6.sh"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",

@@ -3,10 +3,10 @@
 Goal: deliver quickly in a few days while keeping DDD + EDD + Kafka reliability standards.
 
 Status update (2026-03-22):
-1. Phase 4 done and smoke passed: `make smoke-phase4`.
-2. Completed contract-governance points: Schema Registry `BACKWARD`, standardized envelope, and compatibility checks (`v1 -> v2`).
-3. Phase 5 implementation is started in current branch: app metrics, Kafka lag metrics, JSON logs, tracing headers, Prometheus/Grafana dashboard, and runbook updates.
-4. Main changed scope in Phase 5: `apps/*`, `packages/common`, `docker-compose.yml`, `ops/*`, `docs/*`.
+1. Phase 5 done and observable with stack up command: `make up-phase5`.
+2. Phase 6 smoke passed end-to-end: `make smoke-phase6` (unit + integration + failure + restart recovery + metrics checks).
+3. Load baseline captured: `TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6` => throughput `3.05 req/s`, p95 `0.188 s` (local baseline; NFR throughput still needs optimization work).
+4. Interview package assets finalized for phase6: test strategy, diagrams, incident playbooks/runbook references, and 15-minute demo script.
 
 ## Phase 0: Setup and design alignment
 

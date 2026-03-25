@@ -3,10 +3,10 @@
 Mục tiêu: triển khai nhanh trong vài ngày nhưng vẫn giữ chuẩn DDD + EDD + Kafka reliability.
 
 Cập nhật trạng thái (2026-03-22):
-1. Phase 4 đã xong và smoke pass: `make smoke-phase4`.
-2. Các điểm contract governance đã chốt: Schema Registry `BACKWARD`, chuẩn hóa envelope, test tương thích (`v1 -> v2`).
-3. Đã bắt đầu triển khai Phase 5 trên branch hiện tại: metrics app + lag Kafka, JSON logs, tracing headers, dashboard Prometheus/Grafana, và cập nhật runbook.
-4. Phạm vi file chính của Phase 5: `apps/*`, `packages/common`, `docker-compose.yml`, `ops/*`, `docs/*`.
+1. Phase 5 đã hoàn tất và quan sát được qua stack: `make up-phase5`.
+2. Smoke Phase 6 đã pass end-to-end: `make smoke-phase6` (unit + integration + failure + restart recovery + metrics checks).
+3. Đã có baseline load test: `TOTAL_REQUESTS=200 CONCURRENCY=20 make load-phase6` => throughput `3.05 req/s`, p95 `0.188 s` (baseline local; NFR throughput vẫn cần tối ưu thêm).
+4. Bộ tài liệu interview cho phase6 đã chốt: test strategy, diagrams, liên kết runbook/playbook sự cố, và kịch bản demo 15 phút.
 
 ## Phase 0: Khởi tạo và chốt thiết kế
 
